@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.4.0] - 2026-03-06
+
+### Added
+- Channel 自适应 Binding：创建 Agent 时自动检测所有已启用 channel（Telegram/Discord/飞书/企业微信/iMessage）并绑定
+- `auto_bind_channels()` 函数：使用 `openclaw agents bind` 自动为 agent 绑定所有可用渠道
+- SKILL.md 明确分步工作流：面试 → 构造命令 → 执行 → 确认，AI 不再猜测下一步
+
+### Changed
+- `create_agent_core()` 不再硬编码 feishu binding，改用 `auto_bind_channels()`
+- `--fix` 修复 binding 时也使用 channel 自适应逻辑
+- SKILL.md 强调必须用 `$TB --add`，禁止直接调用 `openclaw agents add`
+
 ## [3.3.0] - 2026-03-06
 
 ### Added

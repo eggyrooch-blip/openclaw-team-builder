@@ -126,16 +126,37 @@ JSON output example:
 
 Supported scenarios: `ecommerce`(电商), `content`(内容创作), `devteam`(研发), `startup`(创业), `consulting`(专业服务), `solo`(超级个体).
 
-### AI Agent Interview Workflow
+### AI Agent Workflow: Creating a New Agent
 
-For deeper agent design, the AI Agent should follow this workflow before calling `--add`:
+When the user wants to add a new agent, follow these **exact steps** in order:
 
-1. Ask the user: "这个 Agent 的核心任务是什么？（一句话）"
-2. Ask: "自主级别？（建议/执行/全自动）"
-3. Ask: "有什么禁止事项？"
-4. Ask: "语调风格？（专业/亲切/简洁）"
+**Step 1: Interview** (ask these 4 questions, one at a time):
 
-Then construct the `--role` parameter from these answers and call `--add --soul auto`.
+1. "这个 Agent 的核心任务是什么？（一句话描述，比如'负责市场分析和竞品研究'）"
+2. "自主级别？• 建议（给方案，你来决定）• 执行（直接帮你搞定）• 全自动（完全不用管）"
+3. "有什么禁止事项？（比如'不能删除文件'、'不能发外部消息'）"
+4. "最后一问，语调风格？• 专业 • 亲切 • 简洁"
+
+**Step 2: Construct and execute the command** (do NOT use `openclaw agents add` directly):
+
+```bash
+$TB --add \
+  --id <kebab-case-id-from-name> \
+  --name "<user's chosen name>" \
+  --emoji "<appropriate emoji>" \
+  --role "核心任务：<Q1答案>。自主级别：<Q2答案>。禁止事项：<Q3答案>。语调：<Q4答案>" \
+  --parent main \
+  --soul auto \
+  --yes
+```
+
+The script will automatically: create agent, generate SOUL.md, configure agentToAgent, and **bind to ALL enabled channels** (Telegram, Discord, Feishu, etc.).
+
+**Step 3: Confirm to user**:
+
+"✅ <name> 已创建并加入团队！已自动绑定所有可用渠道（Telegram/飞书/Discord等）。用 `$TB --tree` 查看当前组织架构。"
+
+**IMPORTANT**: Always use `$TB --add` (the script), never directly call `openclaw agents add`. The script handles binding, agentToAgent, hierarchy, and SOUL.md — raw CLI does not.
 
 ## Deploy Solo Template
 

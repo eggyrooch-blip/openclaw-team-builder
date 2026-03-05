@@ -882,6 +882,40 @@ for a in c.get('agents',{}).get('list',[]):
 }
 
 # ══════════════════════════════════════════
+# Channel 自适应 Binding
+# ══════════════════════════════════════════
+
+auto_bind_channels() {
+    local aid="$1"
+    local channels
+    channels=$(openclaw config get channels --json 2>/dev/null | python3 -c "
+import json, sys
+try:
+    channels = json.load(sys.stdin)
+    for name, cfg in channels.items():
+        if isinstance(cfg, dict) and cfg.get('enabled', False):
+            print(name)
+except:
+    pass" 2>/dev/null)
+
+    if [ -z "$channels" ]; then
+        return 0
+    fi
+
+    local bind_args=""
+    for ch in $channels; do
+        case "$ch" in
+            feishu) bind_args="$bind_args --bind feishu:$aid" ;;
+            *)      bind_args="$bind_args --bind $ch" ;;
+        esac
+    done
+
+    if [ -n "$bind_args" ]; then
+        openclaw agents bind --agent "$aid" $bind_args --json 2>/dev/null >/dev/null
+    fi
+}
+
+# ══════════════════════════════════════════
 # 创建 Agent（核心）
 # ══════════════════════════════════════════
 
@@ -897,10 +931,11 @@ create_agent_core() {
 
     openclaw agents add "$aid" \
         --workspace "$workspace" \
-        --bind "feishu:$aid" \
         --non-interactive \
         $amodel \
         --json 2>/dev/null >/dev/null
+
+    auto_bind_channels "$aid"
 
     openclaw agents set-identity \
         --agent "$aid" \
@@ -1700,18 +1735,8 @@ with open('$CONFIG_FILE', 'w') as f:
             bind:*)
                 local aids="${fix#bind:}"
                 for aid in $aids; do
-                    info "为 $aid 添加 binding..."
-                    python3 -c "
-import json
-with open('$CONFIG_FILE') as f:
-    c = json.load(f)
-bindings = c.get('bindings',[])
-if not any(b.get('agentId')=='$aid' for b in bindings):
-    bindings.append({'agentId':'$aid','match':{'channel':'feishu','accountId':'$aid'}})
-c['bindings'] = bindings
-with open('$CONFIG_FILE', 'w') as f:
-    json.dump(c, f, indent=2, ensure_ascii=False)
-" 2>/dev/null
+                    info "为 $aid 添加 binding（自动检测所有 channel）..."
+                    auto_bind_channels "$aid"
                     ok "$aid binding 已添加"
                     fixed=$((fixed + 1))
                 done
