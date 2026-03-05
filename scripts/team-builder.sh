@@ -902,17 +902,19 @@ except:
         return 0
     fi
 
-    local bind_args=""
+    # Bind each channel separately to handle conflicts gracefully.
+    # Feishu uses per-agent accountId (always works for multi-agent).
+    # Shared channels (telegram/discord/etc) may conflict if already bound.
     for ch in $channels; do
         case "$ch" in
-            feishu) bind_args="$bind_args --bind feishu:$aid" ;;
-            *)      bind_args="$bind_args --bind $ch" ;;
+            feishu)
+                openclaw agents bind --agent "$aid" --bind "feishu:$aid" --json 2>/dev/null >/dev/null || true
+                ;;
+            *)
+                openclaw agents bind --agent "$aid" --bind "$ch" --json 2>/dev/null >/dev/null || true
+                ;;
         esac
     done
-
-    if [ -n "$bind_args" ]; then
-        openclaw agents bind --agent "$aid" $bind_args --json 2>/dev/null >/dev/null
-    fi
 }
 
 # ══════════════════════════════════════════
@@ -941,7 +943,7 @@ create_agent_core() {
         --agent "$aid" \
         --name "$aname" \
         --emoji "$aemoji" \
-        --json 2>/dev/null >/dev/null
+        --json 2>/dev/null >/dev/null || true
 
     if [ "$soul_mode" = "auto" ] || [ -z "$soul_mode" ]; then
         generate_soul "$aid" "$aname" "$arole" "$parent_id" "$workspace"
