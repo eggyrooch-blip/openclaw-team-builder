@@ -1,6 +1,6 @@
 #!/bin/bash
 ################################################################################
-# OpenClaw Team Builder v3.2 (Skill Edition)
+# OpenClaw Team Builder v3.4 (Skill Edition)
 # 适配 OpenClaw 2026.3.x | ClawhHub Skill 标准
 #
 # 双模式运行：
@@ -2067,7 +2067,7 @@ if [ $# -gt 0 ]; then
             fi
             ;;
         help)
-            echo "OpenClaw Team Builder v3.3"
+            echo "OpenClaw Team Builder v3.4"
             echo ""
             echo "TUI 模式（人类使用）："
             echo "  bash $0              # 交互菜单"
