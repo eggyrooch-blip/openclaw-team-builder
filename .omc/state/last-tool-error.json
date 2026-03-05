@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"head -2 /Users/kite/Downloads/skills/team-builder/SKILL.md && echo \\\"---\\\" && pwd && echo \\\"---\\\" && npx --yes clawhub@latest publish /Users/kite/Downloads/skills/team-builder --version 3....",
+  "error": "Exit code 1\n---\nname: openclaw-team-builder\n---\n/Users/kite/Downloads/skills/team-builder\n---\n- Preparing team-builder@3.2.0\n\u001b[31m✖\u001b[39m Uncaught Error: Only the owner can publish updates\n    at handler (../../convex/skills.ts:3621:16)\n\nError: Uncaught Error: Only the owner can publish updates\n    at handler (../../convex/skills.ts:3621:16)\n\n\n---\nname: openclaw-team-builder\n---\n/Users/kite/Downloads/skills/team-builder\n---\n- Preparing team-builder@3.2.0\n\u001b[31m✖\u001b[39m Uncaught Error: Only the owner...",
+  "timestamp": "2026-03-05T16:43:29.652Z",
+  "retry_count": 6
+}

@@ -1,5 +1,5 @@
 ---
-name: team-builder
+name: openclaw-team-builder
 description: >
   Manage OpenClaw agent teams — add agents, deploy templates, health check,
   auto-fix, view org tree, rollback. Use when user mentions: team management,
