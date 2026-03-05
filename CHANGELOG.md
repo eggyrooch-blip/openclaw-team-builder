@@ -1,5 +1,14 @@
 # Changelog
 
+## [3.5.0] - 2026-03-06
+
+### Added
+- Channel 管理模式：`--channels [--json]` 查看所有渠道状态和 Agent 绑定情况
+- `--channels --agent <id>` 按 Agent 筛选渠道信息
+- `--channels --agent <id> --feishu-app-id <id> --feishu-secret <s> --yes` 一键配置飞书独立账号
+- `--agent` CLI 参数：支持按 Agent 筛选
+- SKILL.md 增加渠道管理文档和触发词
+
 ## [3.4.0] - 2026-03-06
 
 ### Added

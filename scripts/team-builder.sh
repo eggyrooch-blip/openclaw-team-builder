@@ -1,6 +1,6 @@
 #!/bin/bash
 ################################################################################
-# OpenClaw Team Builder v3.4 (Skill Edition)
+# OpenClaw Team Builder v3.5 (Skill Edition)
 # 适配 OpenClaw 2026.3.x | ClawhHub Skill 标准
 #
 # 双模式运行：
@@ -915,6 +915,146 @@ except:
                 ;;
         esac
     done
+}
+
+# ══════════════════════════════════════════
+# Channel 管理
+# ══════════════════════════════════════════
+
+mode_channels() {
+    local agent_filter="${B_AGENT:-}"
+    local feishu_appid="${B_FEISHU_APPID:-}"
+    local feishu_secret="${B_FEISHU_SECRET:-}"
+
+    # If feishu credentials provided, configure them first
+    if [ -n "$feishu_appid" ] && [ -n "$feishu_secret" ] && [ -n "$agent_filter" ]; then
+        if ! $AUTO_YES; then
+            read -p "  为 $agent_filter 配置飞书账号？(y/n) " yn
+            [ "$yn" != "y" ] && [ "$yn" != "Y" ] && return
+        fi
+        create_backup
+        openclaw config set --json "channels.feishu.accounts.$agent_filter" \
+            "{\"appId\":\"$feishu_appid\",\"appSecret\":\"$feishu_secret\"}" 2>/dev/null
+        openclaw agents bind --agent "$agent_filter" --bind "feishu:$agent_filter" --json 2>/dev/null >/dev/null || true
+        if $JSON_OUTPUT; then
+            echo "{\"action\":\"feishu_configured\",\"agent\":\"$agent_filter\",\"status\":\"ok\"}"
+        else
+            ok "已为 $agent_filter 配置飞书独立账号并绑定"
+        fi
+        return
+    fi
+
+    if $JSON_OUTPUT; then
+        python3 - "$agent_filter" << 'PYEOF'
+import json, os, sys
+
+agent_filter = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
+
+config_file = os.path.expanduser("~/.openclaw/openclaw.json")
+with open(config_file) as f:
+    c = json.load(f)
+
+channels_cfg = c.get("channels", {})
+channels = {}
+for name, cfg in channels_cfg.items():
+    if isinstance(cfg, dict):
+        enabled = cfg.get("enabled", False)
+        ch_type = "per-agent" if name == "feishu" else "shared"
+        accounts = cfg.get("accounts", {}) if name == "feishu" else {}
+        channels[name] = {"enabled": enabled, "type": ch_type, "accounts": list(accounts.keys())}
+
+bindings_raw = c.get("bindings", [])
+agents_list = c.get("agents", {}).get("list", [])
+enabled_channels = [ch for ch, info in channels.items() if info["enabled"]]
+
+agents = []
+for a in agents_list:
+    aid = a["id"]
+    if agent_filter and aid != agent_filter:
+        continue
+    ident = a.get("identity", {})
+    name = ident.get("name", a.get("name", aid))
+    agent_binds = []
+    for b in bindings_raw:
+        if b.get("agentId") == aid:
+            agent_binds.append({
+                "channel": b.get("match", {}).get("channel", "?"),
+                "accountId": b.get("match", {}).get("accountId", "")
+            })
+    bound_chs = [b["channel"] for b in agent_binds]
+    missing = [ch for ch in enabled_channels if ch not in bound_chs]
+    agents.append({
+        "id": aid, "name": name,
+        "bindings": agent_binds,
+        "missing_channels": missing
+    })
+
+result = {"channels": channels, "agents": agents}
+print(json.dumps(result, ensure_ascii=False))
+PYEOF
+        return
+    fi
+
+    header "  渠道管理"
+    blank
+
+    echo -e "  ${BOLD}已配置渠道：${NC}"
+    python3 -c "
+import json, os
+c = json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
+channels = c.get('channels', {})
+for name, cfg in channels.items():
+    if isinstance(cfg, dict):
+        enabled = '✅' if cfg.get('enabled', False) else '❌'
+        ch_type = '独立账号' if name == 'feishu' else '共享'
+        accounts = ''
+        if name == 'feishu':
+            accts = cfg.get('accounts', {})
+            if accts:
+                accounts = f' (账号: {\", \".join(accts.keys())})'
+        print(f'  {enabled} {name:12s} [{ch_type}]{accounts}')
+" 2>/dev/null
+    blank
+
+    echo -e "  ${BOLD}Agent 绑定情况：${NC}"
+    python3 -c "
+import json, os
+c = json.load(open(os.path.expanduser('~/.openclaw/openclaw.json')))
+agents = c.get('agents', {}).get('list', [])
+bindings = c.get('bindings', [])
+channels = c.get('channels', {})
+enabled_chs = [ch for ch, cfg in channels.items() if isinstance(cfg, dict) and cfg.get('enabled', False)]
+
+agent_filter = '$agent_filter'
+for a in agents:
+    aid = a['id']
+    if agent_filter and aid != agent_filter:
+        continue
+    ident = a.get('identity', {})
+    name = ident.get('name', a.get('name', aid))
+    agent_binds = [b for b in bindings if b.get('agentId') == aid]
+    bound_chs = [b.get('match', {}).get('channel', '?') for b in agent_binds]
+    missing = [ch for ch in enabled_chs if ch not in bound_chs]
+    status = '✅' if not missing else '⚠️'
+    print(f'  {status} {name} ({aid})')
+    for b in agent_binds:
+        ch = b.get('match', {}).get('channel', '?')
+        acc = b.get('match', {}).get('accountId', '')
+        acc_str = f':{acc}' if acc else ''
+        print(f'      ├─ {ch}{acc_str}')
+    for m in missing:
+        print(f'      ├─ {m} (未绑定)')
+    print()
+" 2>/dev/null
+
+    divider
+    echo -e "  ${BOLD}渠道说明：${NC}"
+    echo "  - Telegram/Discord/iMessage/企微：共享模式，一个 bot 服务所有 Agent"
+    echo "  - 飞书：独立模式，每个 Agent 可有独立的 appId/appSecret"
+    echo ""
+    echo "  配置飞书独立账号："
+    echo "    bash $0 --channels --agent <id> --feishu-app-id <appId> --feishu-secret <secret> --yes"
+    blank
 }
 
 # ══════════════════════════════════════════
@@ -2026,6 +2166,8 @@ if [ $# -gt 0 ]; then
             --feishu-secret)  B_FEISHU_SECRET="$2"; shift 2 ;;
             --suggest)  MODE="suggest"; shift ;;
             --goal)     B_GOAL="$2"; shift 2 ;;
+            --channels) MODE="channels"; shift ;;
+            --agent)    B_AGENT="$2"; shift 2 ;;
             --index)    B_ROLLBACK_INDEX="$2"; shift 2 ;;
             --help|-h)  MODE="help"; shift ;;
             *) fail "未知参数: $1"; echo "  用 --help 查看帮助"; exit 1 ;;
@@ -2061,6 +2203,8 @@ if [ $# -gt 0 ]; then
             preflight; check_version; init_hierarchy; mode_rollback ;;
         suggest)
             preflight; check_version; init_hierarchy; mode_suggest ;;
+        channels)
+            preflight; check_version; mode_channels ;;
         templates)
             if $JSON_OUTPUT; then
                 list_templates_json
@@ -2069,7 +2213,7 @@ if [ $# -gt 0 ]; then
             fi
             ;;
         help)
-            echo "OpenClaw Team Builder v3.4"
+            echo "OpenClaw Team Builder v3.5"
             echo ""
             echo "TUI 模式（人类使用）："
             echo "  bash $0              # 交互菜单"
@@ -2081,6 +2225,8 @@ if [ $# -gt 0 ]; then
             echo "  bash $0 --status [--json]         # 军团状态"
             echo "  bash $0 --templates [--json]      # 角色模板列表"
             echo "  bash $0 --suggest --goal <desc> [--json]  # 目标驱动团队推荐"
+            echo "  bash $0 --channels [--agent <id>] [--json]  # 渠道管理"
+            echo "  bash $0 --channels --agent <id> --feishu-app-id <id> --feishu-secret <s> --yes  # 配置飞书"
             echo "  bash $0 --rollback [--index N] [--yes]  # 回退"
             echo ""
             echo "  bash $0 --add --id <id> --name <name> --emoji <emoji> \\"

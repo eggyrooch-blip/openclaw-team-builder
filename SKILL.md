@@ -7,7 +7,7 @@ description: >
   deploy solo template, rollback, suggest team, recommend agents.
   Triggers: "加个助手", "新增 Agent", "看看团队", "组织架构", "体检",
   "修复", "回退", "超级个体", "推荐团队", "建议配置", "team builder",
-  "add agent", "suggest team".
+  "add agent", "suggest team", "渠道", "channel", "绑定", "飞书配置".
 metadata: {"clawdbot":{"emoji":"🦞","os":["darwin","linux"],"requires":{"bins":["openclaw","python3"]}}}
 ---
 
@@ -235,6 +235,45 @@ $TB --templates --json
 ```
 
 Available templates: `xingzheng`(行政), `caiwu`(财务), `hr`(人力), `kefu`(客服), `yunying`(运营), `falv`(法务), `neirong`(内容), `shuju`(数据), `jishu`(技术)
+
+## Channel Management
+
+View channel status, agent bindings, and configure per-agent credentials (e.g., Feishu).
+
+```bash
+# List all channels and bindings (human-readable)
+$TB --channels
+
+# JSON output (for parsing)
+$TB --channels --json
+
+# Filter by agent
+$TB --channels --agent kefu --json
+
+# Configure Feishu credentials for an agent
+$TB --channels --agent kefu --feishu-app-id cli_xxx --feishu-secret yyy --yes
+```
+
+JSON output example:
+```json
+{
+  "channels": {
+    "telegram": {"enabled": true, "type": "shared", "accounts": []},
+    "feishu": {"enabled": true, "type": "per-agent", "accounts": ["main"]}
+  },
+  "agents": [
+    {
+      "id": "main", "name": "软软",
+      "bindings": [{"channel": "telegram", "accountId": ""}],
+      "missing_channels": ["feishu"]
+    }
+  ]
+}
+```
+
+Channel types:
+- **Shared** (Telegram/Discord/iMessage/WeChat): One bot shared by all agents. Binding may conflict if already bound to another agent.
+- **Per-agent** (Feishu): Each agent can have its own appId/appSecret. No conflicts.
 
 ## Health Check
 
