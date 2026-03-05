@@ -2,10 +2,12 @@
 name: openclaw-team-builder
 description: >
   Manage OpenClaw agent teams — add agents, deploy templates, health check,
-  auto-fix, view org tree, rollback. Use when user mentions: team management,
-  add agent, org chart, health check, deploy solo template, rollback.
+  auto-fix, view org tree, rollback, goal-driven team suggestion.
+  Use when user mentions: team management, add agent, org chart, health check,
+  deploy solo template, rollback, suggest team, recommend agents.
   Triggers: "加个助手", "新增 Agent", "看看团队", "组织架构", "体检",
-  "修复", "回退", "超级个体", "team builder", "add agent".
+  "修复", "回退", "超级个体", "推荐团队", "建议配置", "team builder",
+  "add agent", "suggest team".
 metadata: {"clawdbot":{"emoji":"🦞","os":["darwin","linux"],"requires":{"bins":["openclaw","python3"]}}}
 ---
 
@@ -94,6 +96,46 @@ $TB --add \
 - `auto` — Generate SOUL.md from role description + org relationships
 - `template:<key>` — Use built-in template (also sets name/emoji/role automatically)
 - `skip` — Keep OpenClaw default template
+
+## Goal-Driven Team Suggestion
+
+Given a business goal, recommend the best team configuration from built-in templates.
+
+```bash
+# Get recommendation (human-readable)
+$TB --suggest --goal "电商平台运营"
+
+# JSON output (for AI Agent parsing)
+$TB --suggest --goal "电商平台运营" --json
+```
+
+JSON output example:
+```json
+{
+  "goal": "电商平台运营",
+  "matched_scenario": "ecommerce",
+  "scenario_name": "电商团队",
+  "recommended_agents": [
+    {"id": "kefu", "template": "kefu", "reason": "处理客户咨询和售后"},
+    {"id": "yunying", "template": "yunying", "reason": "运营数据分析和活动策划"}
+  ],
+  "deploy_commands": ["$TB --add --id kefu --soul template:kefu --parent main --yes", "..."],
+  "total_agents": 4
+}
+```
+
+Supported scenarios: `ecommerce`(电商), `content`(内容创作), `devteam`(研发), `startup`(创业), `consulting`(专业服务), `solo`(超级个体).
+
+### AI Agent Interview Workflow
+
+For deeper agent design, the AI Agent should follow this workflow before calling `--add`:
+
+1. Ask the user: "这个 Agent 的核心任务是什么？（一句话）"
+2. Ask: "自主级别？（建议/执行/全自动）"
+3. Ask: "有什么禁止事项？"
+4. Ask: "语调风格？（专业/亲切/简洁）"
+
+Then construct the `--role` parameter from these answers and call `--add --soul auto`.
 
 ## Deploy Solo Template
 

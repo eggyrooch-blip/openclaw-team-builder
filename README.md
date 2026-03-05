@@ -57,6 +57,7 @@ TB="bash ~/.openclaw/skills/team-builder/scripts/team-builder.sh"
 $TB --tree [--json]                          # 查看架构
 $TB --add --id <id> [--name --emoji --role --parent --soul --model] [--yes]  # 新增
 $TB --solo [--model <m>] [--yes]             # 超级个体模板
+$TB --suggest --goal "业务目标" [--json]     # 目标驱动团队推荐
 $TB --templates [--json]                     # 角色模板列表
 $TB --checkup [--json]                       # 健康检查
 $TB --fix [--yes]                            # 一键修复

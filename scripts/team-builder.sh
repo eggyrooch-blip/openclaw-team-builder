@@ -42,6 +42,7 @@ AUTO_YES=false
 B_ID="" B_NAME="" B_EMOJI="" B_ROLE="" B_PARENT=""
 B_SOUL="auto" B_MODEL="" B_FEISHU_APPID="" B_FEISHU_SECRET=""
 B_ROLLBACK_INDEX=""
+B_GOAL=""
 
 # ── 环境检查 ──
 preflight() {
@@ -604,6 +605,168 @@ templates = [
     {"key": "jishu", "id": "jishu", "name": "小技-技术支持", "emoji": "🔧", "focus": "IT运维/故障排查/系统监控"},
 ]
 print(json.dumps(templates, ensure_ascii=False))
+PYEOF
+}
+
+# ══════════════════════════════════════════
+# 目标驱动团队推荐 (--suggest)
+# ══════════════════════════════════════════
+
+# 预定义团队场景
+mode_suggest() {
+    local goal="${B_GOAL:-}"
+
+    if [ -z "$goal" ]; then
+        if $JSON_OUTPUT; then
+            echo '{"error":"missing_goal","message":"--goal 参数必填"}'
+            exit 1
+        fi
+        fail "--suggest 需要 --goal 参数"
+        note "用法: $0 --suggest --goal \"你的业务目标\""
+        exit 1
+    fi
+
+    # 关键词匹配引擎
+    local _json_flag="false"
+    $JSON_OUTPUT && _json_flag="true"
+    python3 - "$goal" "$_json_flag" << 'PYEOF'
+import json, sys, re
+
+goal = sys.argv[1].lower()
+json_mode = sys.argv[2] == "true"
+
+# 场景定义：关键词 → 推荐模板组合
+SCENARIOS = {
+    "ecommerce": {
+        "keywords": ["电商", "商城", "网店", "淘宝", "天猫", "shopify", "ecommerce", "shop", "卖货", "零售"],
+        "name": "电商团队",
+        "agents": [
+            {"id": "kefu", "template": "kefu", "reason": "处理客户咨询和售后"},
+            {"id": "yunying", "template": "yunying", "reason": "运营数据分析和活动策划"},
+            {"id": "neirong", "template": "neirong", "reason": "产品文案和营销内容"},
+            {"id": "shuju", "template": "shuju", "reason": "销售数据报表和趋势分析"},
+        ]
+    },
+    "content": {
+        "keywords": ["内容", "自媒体", "公众号", "博客", "短视频", "content", "media", "写作", "创作"],
+        "name": "内容创作团队",
+        "agents": [
+            {"id": "neirong", "template": "neirong", "reason": "内容创作和排期管理"},
+            {"id": "shuju", "template": "shuju", "reason": "内容数据分析和效果追踪"},
+            {"id": "yunying", "template": "yunying", "reason": "渠道运营和用户增长"},
+        ]
+    },
+    "devteam": {
+        "keywords": ["开发", "研发", "编程", "软件", "代码", "dev", "code", "技术团队", "工程"],
+        "name": "研发团队",
+        "agents": [
+            {"id": "jishu", "template": "jishu", "reason": "技术架构和运维支持"},
+            {"id": "shuju", "template": "shuju", "reason": "数据分析和监控"},
+            {"id": "neirong", "template": "neirong", "reason": "技术文档和API文档"},
+        ]
+    },
+    "startup": {
+        "keywords": ["创业", "startup", "公司", "企业", "团队管理", "管理"],
+        "name": "创业公司团队",
+        "agents": [
+            {"id": "xingzheng", "template": "xingzheng", "reason": "行政后勤和日程管理"},
+            {"id": "caiwu", "template": "caiwu", "reason": "财务管理和报销审批"},
+            {"id": "hr", "template": "hr", "reason": "招聘和人事管理"},
+            {"id": "falv", "template": "falv", "reason": "合同审查和法律咨询"},
+        ]
+    },
+    "consulting": {
+        "keywords": ["咨询", "顾问", "服务", "客户", "consulting", "律所", "会计"],
+        "name": "专业服务团队",
+        "agents": [
+            {"id": "kefu", "template": "kefu", "reason": "客户接待和需求对接"},
+            {"id": "falv", "template": "falv", "reason": "专业合规和法律支持"},
+            {"id": "xingzheng", "template": "xingzheng", "reason": "日程和文件管理"},
+            {"id": "shuju", "template": "shuju", "reason": "案例数据分析"},
+        ]
+    },
+    "solo": {
+        "keywords": ["超级个体", "一人公司", "自由职业", "独立", "solo", "freelance", "个人"],
+        "name": "超级个体团队",
+        "agents": [
+            {"id": "solo-dev", "template": None, "reason": "全栈开发", "name": "全栈工程师", "emoji": "💻"},
+            {"id": "solo-design", "template": None, "reason": "UI/UX设计", "name": "设计师", "emoji": "🎨"},
+            {"id": "solo-content", "template": None, "reason": "内容创作", "name": "内容专家", "emoji": "✍️"},
+            {"id": "solo-data", "template": None, "reason": "数据分析", "name": "数据分析", "emoji": "📊"},
+        ]
+    },
+}
+
+# 匹配场景
+matched = []
+for key, scenario in SCENARIOS.items():
+    score = sum(1 for kw in scenario["keywords"] if kw in goal)
+    if score > 0:
+        matched.append((score, key, scenario))
+
+matched.sort(key=lambda x: -x[0])
+
+if not matched:
+    # 无匹配 → 返回通用建议
+    result = {
+        "goal": goal,
+        "matched_scenario": None,
+        "message": "未匹配到预设场景，建议从模板库中选择",
+        "available_templates": ["xingzheng", "caiwu", "hr", "kefu", "yunying", "falv", "neirong", "shuju", "jishu"],
+        "tip": "使用 --templates --json 查看所有模板详情"
+    }
+else:
+    best = matched[0]
+    scenario = best[2]
+    agents = scenario["agents"]
+
+    # 生成部署命令
+    cmds = []
+    for a in agents:
+        if a.get("template"):
+            cmds.append(f"$TB --add --id {a['id']} --soul template:{a['template']} --parent main --yes")
+        else:
+            name = a.get("name", a["id"])
+            emoji = a.get("emoji", "🤖")
+            cmds.append(f"$TB --add --id {a['id']} --name \"{name}\" --emoji \"{emoji}\" --role \"{a['reason']}\" --parent main --yes")
+
+    result = {
+        "goal": goal,
+        "matched_scenario": best[1],
+        "scenario_name": scenario["name"],
+        "recommended_agents": agents,
+        "deploy_commands": cmds,
+        "total_agents": len(agents),
+    }
+
+    # 如果有其他匹配，也列出
+    if len(matched) > 1:
+        result["alternative_scenarios"] = [
+            {"key": m[1], "name": m[2]["name"], "agents": len(m[2]["agents"])}
+            for m in matched[1:3]
+        ]
+
+if json_mode:
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+else:
+    if result.get("matched_scenario"):
+        print(f"\n  推荐团队：{result['scenario_name']}")
+        print(f"  目标：{goal}")
+        print(f"  匹配场景：{result['matched_scenario']}")
+        print()
+        for a in result["recommended_agents"]:
+            tpl = a.get("template") or "自定义"
+            emoji = a.get("emoji", "🤖")
+            print(f"    {emoji} {a['id']} — {a['reason']} (模板: {tpl})")
+        print()
+        print("  部署命令：")
+        for cmd in result["deploy_commands"]:
+            print(f"    {cmd}")
+        print()
+    else:
+        print(f"\n  未匹配到预设场景: {goal}")
+        print("  建议使用 --templates 查看可用角色模板")
+        print()
 PYEOF
 }
 
@@ -1834,6 +1997,8 @@ if [ $# -gt 0 ]; then
             --model)    B_MODEL="$2"; shift 2 ;;
             --feishu-app-id)  B_FEISHU_APPID="$2"; shift 2 ;;
             --feishu-secret)  B_FEISHU_SECRET="$2"; shift 2 ;;
+            --suggest)  MODE="suggest"; shift ;;
+            --goal)     B_GOAL="$2"; shift 2 ;;
             --index)    B_ROLLBACK_INDEX="$2"; shift 2 ;;
             --help|-h)  MODE="help"; shift ;;
             *) fail "未知参数: $1"; echo "  用 --help 查看帮助"; exit 1 ;;
@@ -1867,6 +2032,8 @@ if [ $# -gt 0 ]; then
             preflight; check_version; init_hierarchy; mode_status ;;
         rollback)
             preflight; check_version; init_hierarchy; mode_rollback ;;
+        suggest)
+            preflight; check_version; init_hierarchy; mode_suggest ;;
         templates)
             if $JSON_OUTPUT; then
                 list_templates_json
@@ -1875,7 +2042,7 @@ if [ $# -gt 0 ]; then
             fi
             ;;
         help)
-            echo "OpenClaw Team Builder v3.2"
+            echo "OpenClaw Team Builder v3.3"
             echo ""
             echo "TUI 模式（人类使用）："
             echo "  bash $0              # 交互菜单"
@@ -1886,6 +2053,7 @@ if [ $# -gt 0 ]; then
             echo "  bash $0 --fix [--yes]             # 一键修复"
             echo "  bash $0 --status [--json]         # 军团状态"
             echo "  bash $0 --templates [--json]      # 角色模板列表"
+            echo "  bash $0 --suggest --goal <desc> [--json]  # 目标驱动团队推荐"
             echo "  bash $0 --rollback [--index N] [--yes]  # 回退"
             echo ""
             echo "  bash $0 --add --id <id> --name <name> --emoji <emoji> \\"
