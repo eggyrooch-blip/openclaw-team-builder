@@ -176,10 +176,36 @@ Then show the tree:
 $TB --tree
 ```
 
+**Step 4: Channel configuration** (in the SAME response):
+
+After creation, check which channels need per-agent config:
+
+```bash
+# Show current channel status
+$TB --status --json
+```
+
+Then guide the user:
+
+"📡 渠道绑定情况：
+- ✅ Telegram/Discord/iMessage/企微 — 共享现有 bot，已自动绑定
+- ⚠️ 飞书 — 需要独立的 appId/appSecret
+
+需要为 <name> 配置独立的飞书 bot 吗？如果需要，请提供 appId 和 appSecret。不需要的话这步可以跳过。"
+
+If user provides feishu credentials:
+```bash
+openclaw config set --json "channels.feishu.accounts.<agent-id>" '{"appId":"<id>","appSecret":"<secret>"}'
+openclaw gateway restart
+```
+
+If user says skip or doesn't need feishu, move on — other channels already work.
+
 **IMPORTANT**:
 - Always use `$TB --add`, never directly call `openclaw agents add`
 - Never split into multiple Q&A rounds — collect everything in one message
 - If user says something like "加个客服" — use the template: `$TB --add --id kefu --soul template:kefu --parent main --yes`
+- After `--add`, always show channel binding status and offer feishu config
 
 ## Deploy Solo Template
 
