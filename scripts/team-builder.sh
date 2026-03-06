@@ -902,19 +902,38 @@ except:
         return 0
     fi
 
-    # Bind each channel separately to handle conflicts gracefully.
-    # Feishu uses per-agent accountId (always works for multi-agent).
-    # Shared channels (telegram/discord/etc) may conflict if already bound.
+    local bound_ok=""
+    local bound_fail=""
+
     for ch in $channels; do
+        local result
         case "$ch" in
             feishu)
-                openclaw agents bind --agent "$aid" --bind "feishu:$aid" --json 2>/dev/null >/dev/null || true
+                result=$(openclaw agents bind --agent "$aid" --bind "feishu:$aid" --json 2>&1) || true
                 ;;
             *)
-                openclaw agents bind --agent "$aid" --bind "$ch" --json 2>/dev/null >/dev/null || true
+                result=$(openclaw agents bind --agent "$aid" --bind "$ch" --json 2>&1) || true
                 ;;
         esac
+        if echo "$result" | grep -qi "conflict\|error\|fail"; then
+            bound_fail="$bound_fail $ch"
+        else
+            bound_ok="$bound_ok $ch"
+        fi
     done
+
+    # Output binding summary (visible in script output, AI can forward to user)
+    if [ -n "$bound_ok" ]; then
+        echo "  BIND_OK:$bound_ok"
+    fi
+    if [ -n "$bound_fail" ]; then
+        echo "  BIND_NEED_BOT:$bound_fail"
+        echo "  NOTE: 以上渠道需要为 $aid 创建独立 bot。"
+        echo "  Telegram: 找 @BotFather 发 /newbot 获取 token"
+        echo "  Discord: Developer Portal 创建 Application 获取 token"
+        echo "  飞书: 开放平台创建应用获取 App ID + Secret"
+        echo "  然后执行: \$TB --channels --agent $aid --channel <渠道> --token <token> --yes"
+    fi
 }
 
 # ══════════════════════════════════════════
@@ -1130,7 +1149,7 @@ create_agent_core() {
         $amodel \
         --json 2>/dev/null >/dev/null
 
-    auto_bind_channels "$aid"
+    BIND_RESULT=$(auto_bind_channels "$aid" 2>/dev/null)
 
     openclaw agents set-identity \
         --agent "$aid" \
@@ -1459,24 +1478,49 @@ mode_add_batch() {
 
     record_created_agent "$bdir" "$B_ID"
 
+    # Extract bind results from create_agent_core
+    local bind_ok bind_need
+    bind_ok=$(echo "$BIND_RESULT" | grep "BIND_OK:" | sed 's/.*BIND_OK://' | xargs)
+    bind_need=$(echo "$BIND_RESULT" | grep "BIND_NEED_BOT:" | sed 's/.*BIND_NEED_BOT://' | xargs)
+
     if $JSON_OUTPUT; then
-        python3 -c "
-import json
+        python3 - "$B_ID" "$B_NAME" "$B_EMOJI" "$B_PARENT" "$soul_mode" "$OPENCLAW_DIR/workspace-$B_ID" "$bind_ok" "$bind_need" << 'PYEOF'
+import json, sys
 result = {
     'status': 'created',
-    'id': '$B_ID',
-    'name': '$B_NAME',
-    'emoji': '$B_EMOJI',
-    'parent': '$B_PARENT',
-    'soul_mode': '$soul_mode',
-    'workspace': '$OPENCLAW_DIR/workspace-$B_ID',
-    'message': '创建成功，运行 openclaw gateway restart 生效'
+    'id': sys.argv[1],
+    'name': sys.argv[2],
+    'emoji': sys.argv[3],
+    'parent': sys.argv[4],
+    'soul_mode': sys.argv[5],
+    'workspace': sys.argv[6],
+    'channels_bound': sys.argv[7].split() if sys.argv[7] else [],
+    'channels_need_bot': sys.argv[8].split() if sys.argv[8] else [],
+    'message': '创建成功，运行 openclaw gateway restart 生效',
+    'next_steps': []
 }
+for ch in result['channels_need_bot']:
+    if ch == 'telegram':
+        result['next_steps'].append(f'Telegram: 找 @BotFather 创建 bot，获取 token 后执行 --channels --agent {sys.argv[1]} --channel telegram --token <token> --yes')
+    elif ch == 'discord':
+        result['next_steps'].append(f'Discord: Developer Portal 创建 bot，获取 token 后执行 --channels --agent {sys.argv[1]} --channel discord --token <token> --yes')
+    elif ch == 'feishu':
+        result['next_steps'].append(f'飞书: 开放平台创建应用，获取凭证后执行 --channels --agent {sys.argv[1]} --channel feishu --feishu-app-id <id> --feishu-secret <s> --yes')
 print(json.dumps(result, ensure_ascii=False))
-"
+PYEOF
     else
         blank
         ok "入职完成：$B_EMOJI $B_NAME ($B_ID) → $B_PARENT"
+        if [ -n "$bind_ok" ]; then
+            echo -e "  ${GREEN}渠道已绑定：${NC}$bind_ok"
+        fi
+        if [ -n "$bind_need" ]; then
+            echo -e "  ${YELLOW}需要独立 bot：${NC}$bind_need"
+            echo "  Telegram: 找 @BotFather 发 /newbot 获取 token"
+            echo "  Discord: Developer Portal 创建 Application 获取 token"
+            echo "  飞书: 开放平台创建应用获取 App ID + Secret"
+            echo "  配置: bash $0 --channels --agent $B_ID --channel <渠道> --token <token> --yes"
+        fi
         note "生效：openclaw gateway restart"
     fi
 }
