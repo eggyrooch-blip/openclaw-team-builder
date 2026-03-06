@@ -925,22 +925,73 @@ mode_channels() {
     local agent_filter="${B_AGENT:-}"
     local feishu_appid="${B_FEISHU_APPID:-}"
     local feishu_secret="${B_FEISHU_SECRET:-}"
+    local channel_name="${B_CHANNEL:-}"
+    local channel_token="${B_TOKEN:-}"
 
-    # If feishu credentials provided, configure them first
+    # Action: add a channel bot for an agent
+    if [ -n "$channel_name" ] && [ -n "$agent_filter" ]; then
+        case "$channel_name" in
+            feishu)
+                if [ -z "$feishu_appid" ] || [ -z "$feishu_secret" ]; then
+                    fail "飞书需要 --feishu-app-id 和 --feishu-secret"; return 1
+                fi
+                if ! $AUTO_YES; then
+                    read -p "  为 $agent_filter 配置飞书账号？(y/n) " yn
+                    [ "$yn" != "y" ] && [ "$yn" != "Y" ] && return
+                fi
+                do_backup
+                openclaw config set --json "channels.feishu.accounts.$agent_filter" \
+                    "{\"appId\":\"$feishu_appid\",\"appSecret\":\"$feishu_secret\"}" 2>/dev/null
+                openclaw agents bind --agent "$agent_filter" --bind "feishu:$agent_filter" --json 2>/dev/null >/dev/null || true
+                if $JSON_OUTPUT; then
+                    echo "{\"action\":\"channel_configured\",\"channel\":\"feishu\",\"agent\":\"$agent_filter\",\"status\":\"ok\"}"
+                else
+                    ok "已为 $agent_filter 配置飞书独立账号并绑定"
+                fi
+                ;;
+            telegram|discord)
+                if [ -z "$channel_token" ]; then
+                    fail "$channel_name 需要 --token <bot-token>"; return 1
+                fi
+                if ! $AUTO_YES; then
+                    read -p "  为 $agent_filter 添加 $channel_name bot？(y/n) " yn
+                    [ "$yn" != "y" ] && [ "$yn" != "Y" ] && return
+                fi
+                do_backup
+                openclaw channels add --channel "$channel_name" --token "$channel_token" --account "$agent_filter" 2>/dev/null
+                openclaw agents bind --agent "$agent_filter" --bind "$channel_name:$agent_filter" --json 2>/dev/null >/dev/null || true
+                if $JSON_OUTPUT; then
+                    echo "{\"action\":\"channel_configured\",\"channel\":\"$channel_name\",\"agent\":\"$agent_filter\",\"status\":\"ok\"}"
+                else
+                    ok "已为 $agent_filter 添加 $channel_name bot 并绑定"
+                fi
+                ;;
+            *)
+                if [ -z "$channel_token" ]; then
+                    fail "$channel_name 需要 --token <token>"; return 1
+                fi
+                if ! $AUTO_YES; then
+                    read -p "  为 $agent_filter 配置 $channel_name？(y/n) " yn
+                    [ "$yn" != "y" ] && [ "$yn" != "Y" ] && return
+                fi
+                do_backup
+                openclaw channels add --channel "$channel_name" --token "$channel_token" --account "$agent_filter" 2>/dev/null
+                openclaw agents bind --agent "$agent_filter" --bind "$channel_name:$agent_filter" --json 2>/dev/null >/dev/null || true
+                if $JSON_OUTPUT; then
+                    echo "{\"action\":\"channel_configured\",\"channel\":\"$channel_name\",\"agent\":\"$agent_filter\",\"status\":\"ok\"}"
+                else
+                    ok "已为 $agent_filter 配置 $channel_name 并绑定"
+                fi
+                ;;
+        esac
+        return
+    fi
+
+    # Legacy: feishu-only shorthand (backward compat)
     if [ -n "$feishu_appid" ] && [ -n "$feishu_secret" ] && [ -n "$agent_filter" ]; then
-        if ! $AUTO_YES; then
-            read -p "  为 $agent_filter 配置飞书账号？(y/n) " yn
-            [ "$yn" != "y" ] && [ "$yn" != "Y" ] && return
-        fi
-        create_backup
-        openclaw config set --json "channels.feishu.accounts.$agent_filter" \
-            "{\"appId\":\"$feishu_appid\",\"appSecret\":\"$feishu_secret\"}" 2>/dev/null
-        openclaw agents bind --agent "$agent_filter" --bind "feishu:$agent_filter" --json 2>/dev/null >/dev/null || true
-        if $JSON_OUTPUT; then
-            echo "{\"action\":\"feishu_configured\",\"agent\":\"$agent_filter\",\"status\":\"ok\"}"
-        else
-            ok "已为 $agent_filter 配置飞书独立账号并绑定"
-        fi
+        B_CHANNEL="feishu"
+        channel_name="feishu"
+        mode_channels
         return
     fi
 
@@ -1049,11 +1100,13 @@ for a in agents:
 
     divider
     echo -e "  ${BOLD}渠道说明：${NC}"
-    echo "  - Telegram/Discord/iMessage/企微：共享模式，一个 bot 服务所有 Agent"
-    echo "  - 飞书：独立模式，每个 Agent 可有独立的 appId/appSecret"
+    echo "  - 每个 Agent 可以有自己独立的 bot（Telegram/Discord/飞书等）"
+    echo "  - 共享 bot 只能绑定一个 Agent；需要多 Agent 就需要多个 bot"
     echo ""
-    echo "  配置飞书独立账号："
-    echo "    bash $0 --channels --agent <id> --feishu-app-id <appId> --feishu-secret <secret> --yes"
+    echo -e "  ${BOLD}为 Agent 添加渠道 bot：${NC}"
+    echo "    Telegram:  bash $0 --channels --agent <id> --channel telegram --token <bot-token> --yes"
+    echo "    Discord:   bash $0 --channels --agent <id> --channel discord --token <bot-token> --yes"
+    echo "    飞书:      bash $0 --channels --agent <id> --channel feishu --feishu-app-id <id> --feishu-secret <s> --yes"
     blank
 }
 
@@ -2168,6 +2221,8 @@ if [ $# -gt 0 ]; then
             --goal)     B_GOAL="$2"; shift 2 ;;
             --channels) MODE="channels"; shift ;;
             --agent)    B_AGENT="$2"; shift 2 ;;
+            --channel)  B_CHANNEL="$2"; shift 2 ;;
+            --token)    B_TOKEN="$2"; shift 2 ;;
             --index)    B_ROLLBACK_INDEX="$2"; shift 2 ;;
             --help|-h)  MODE="help"; shift ;;
             *) fail "未知参数: $1"; echo "  用 --help 查看帮助"; exit 1 ;;
@@ -2226,7 +2281,9 @@ if [ $# -gt 0 ]; then
             echo "  bash $0 --templates [--json]      # 角色模板列表"
             echo "  bash $0 --suggest --goal <desc> [--json]  # 目标驱动团队推荐"
             echo "  bash $0 --channels [--agent <id>] [--json]  # 渠道管理"
-            echo "  bash $0 --channels --agent <id> --feishu-app-id <id> --feishu-secret <s> --yes  # 配置飞书"
+            echo "  bash $0 --channels --agent <id> --channel telegram --token <token> --yes  # 添加 Telegram bot"
+            echo "  bash $0 --channels --agent <id> --channel discord --token <token> --yes  # 添加 Discord bot"
+            echo "  bash $0 --channels --agent <id> --channel feishu --feishu-app-id <id> --feishu-secret <s> --yes  # 添加飞书"
             echo "  bash $0 --rollback [--index N] [--yes]  # 回退"
             echo ""
             echo "  bash $0 --add --id <id> --name <name> --emoji <emoji> \\"

@@ -178,28 +178,38 @@ $TB --tree
 
 **Step 4: Channel configuration** (in the SAME response):
 
-After creation, check which channels need per-agent config:
+After creation, check which channels the agent is missing:
 
 ```bash
-# Show current channel status
-$TB --status --json
+$TB --channels --agent <id> --json
 ```
 
-Then guide the user:
+Then guide the user based on `missing_channels`:
 
-"📡 渠道绑定情况：
-- ✅ Telegram/Discord/iMessage/企微 — 共享现有 bot，已自动绑定
-- ⚠️ 飞书 — 需要独立的 appId/appSecret
+"📡 <name> 缺少以下渠道：<missing_channels>
 
-需要为 <name> 配置独立的飞书 bot 吗？如果需要，请提供 appId 和 appSecret。不需要的话这步可以跳过。"
+要配置独立的 bot 吗？
+- Telegram：请到 @BotFather 创建 bot，把 token 发给我
+- Discord：请到 Developer Portal 创建 bot，把 token 发给我
+- 飞书：请提供 App ID 和 App Secret
+- 不需要的话可以跳过。"
 
-If user provides feishu credentials:
+When user provides credentials:
 ```bash
-openclaw config set --json "channels.feishu.accounts.<agent-id>" '{"appId":"<id>","appSecret":"<secret>"}'
+# Telegram
+$TB --channels --agent <id> --channel telegram --token <token> --yes
+
+# Discord
+$TB --channels --agent <id> --channel discord --token <token> --yes
+
+# Feishu
+$TB --channels --agent <id> --channel feishu --feishu-app-id <id> --feishu-secret <s> --yes
+```
+
+Then restart gateway:
+```bash
 openclaw gateway restart
 ```
-
-If user says skip or doesn't need feishu, move on — other channels already work.
 
 **IMPORTANT**:
 - Always use `$TB --add`, never directly call `openclaw agents add`
@@ -238,20 +248,23 @@ Available templates: `xingzheng`(行政), `caiwu`(财务), `hr`(人力), `kefu`(
 
 ## Channel Management
 
-View channel status, agent bindings, and configure per-agent credentials (e.g., Feishu).
+View channel status, agent bindings, and add new bots for agents.
 
 ```bash
-# List all channels and bindings (human-readable)
-$TB --channels
-
-# JSON output (for parsing)
+# List all channels and bindings
 $TB --channels --json
 
 # Filter by agent
 $TB --channels --agent kefu --json
 
-# Configure Feishu credentials for an agent
-$TB --channels --agent kefu --feishu-app-id cli_xxx --feishu-secret yyy --yes
+# Add a Telegram bot for an agent
+$TB --channels --agent kefu --channel telegram --token <bot-token> --yes
+
+# Add a Discord bot for an agent
+$TB --channels --agent kefu --channel discord --token <bot-token> --yes
+
+# Add a Feishu app for an agent
+$TB --channels --agent kefu --channel feishu --feishu-app-id cli_xxx --feishu-secret yyy --yes
 ```
 
 JSON output example:
@@ -271,9 +284,51 @@ JSON output example:
 }
 ```
 
-Channel types:
-- **Shared** (Telegram/Discord/iMessage/WeChat): One bot shared by all agents. Binding may conflict if already bound to another agent.
-- **Per-agent** (Feishu): Each agent can have its own appId/appSecret. No conflicts.
+### Channel Model
+- Each Agent can have its own bot (Telegram/Discord/Feishu etc.)
+- A shared bot can only bind to ONE agent
+- To have multiple agents on the same channel, each needs its own bot
+
+### How to create bots (guide the user):
+- **Telegram**: Talk to @BotFather on Telegram → `/newbot` → get token
+- **Discord**: Discord Developer Portal → New Application → Bot → Copy Token
+- **Feishu**: 飞书开放平台 → 创建应用 → 获取 App ID + App Secret
+
+### AI Agent Workflow: Channel Configuration
+
+After creating an agent, check channel status and guide the user:
+
+```bash
+$TB --channels --agent <id> --json
+```
+
+If the agent has missing channels, ask the user:
+
+"📡 <name> 目前缺少以下渠道绑定：<missing_channels>
+
+要为 <name> 配置独立的 bot 吗？
+- Telegram：请先到 @BotFather 创建 bot，把 token 发给我
+- Discord：请到 Developer Portal 创建 bot，把 token 发给我
+- 飞书：请提供 App ID 和 App Secret
+
+也可以跳过，之后随时用 --channels 配置。"
+
+When the user provides credentials, execute:
+```bash
+# Telegram
+$TB --channels --agent <id> --channel telegram --token <token> --yes
+
+# Discord
+$TB --channels --agent <id> --channel discord --token <token> --yes
+
+# Feishu
+$TB --channels --agent <id> --channel feishu --feishu-app-id <id> --feishu-secret <s> --yes
+```
+
+Then restart gateway and confirm:
+```bash
+openclaw gateway restart
+```
 
 ## Health Check
 

@@ -58,7 +58,8 @@ $TB --tree [--json]                          # 查看架构
 $TB --add --id <id> [--name --emoji --role --parent --soul --model] [--yes]  # 新增
 $TB --solo [--model <m>] [--yes]             # 超级个体模板
 $TB --suggest --goal "业务目标" [--json]     # 目标驱动团队推荐
-$TB --channels [--agent <id>] [--json]      # 渠道管理
+$TB --channels [--agent <id>] [--json]      # 渠道状态
+$TB --channels --agent <id> --channel telegram --token <t> --yes  # 添加 bot
 $TB --templates [--json]                     # 角色模板列表
 $TB --checkup [--json]                       # 健康检查
 $TB --fix [--yes]                            # 一键修复

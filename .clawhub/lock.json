@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "skills": {
+    "agent-builder": {
+      "version": "1.0.0",
+      "installedAt": 1772729497247
+    },
+    "agent-team-orchestration": {
+      "version": "1.0.0",
+      "installedAt": 1772729503964
+    },
+    "teamwork": {
+      "version": "1.0.0",
+      "installedAt": 1772729524517
+    },
+    "subagent-spawn-command-builder": {
+      "version": "0.1.2",
+      "installedAt": 1772729541121
+    }
+  }
+}
