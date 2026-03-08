@@ -192,13 +192,49 @@ normalize_base_url() {
     echo "$url"
 }
 
+# --- 临时文件清理 ---
+_TMPFILES=()
+_cleanup_tmp() { rm -f "${_TMPFILES[@]}" 2>/dev/null; }
+trap _cleanup_tmp EXIT INT TERM
+
 # --- OpenClaw 远程执行辅助 ---
 oc_exec() {
     if [ -n "$SSH_PREFIX" ]; then
         $SSH_PREFIX "source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null; export PATH=/opt/homebrew/bin:\$PATH && $*" </dev/null 2>&1
     else
-        eval "$@" 2>&1
+        bash -c "$*" 2>&1
     fi
+}
+
+# --- 安全: 清洁用户输入 (模型名/provider名/路径) ---
+sanitize_input() {
+    # 移除可能导致 shell 注入的字符: ; | & ` $ ( ) { } < > ! \n
+    local val="$1"
+    val="${val//\'/}"
+    val="${val//\"/}"
+    val="${val//\;/}"
+    val="${val//\|/}"
+    val="${val//\&/}"
+    val="${val//\`/}"
+    val="${val//\$/}"
+    val="${val//\(/}"
+    val="${val//\)/}"
+    val="${val//\{/}"
+    val="${val//\}/}"
+    val="${val//\</}"
+    val="${val//\>/}"
+    val="${val//\!/}"
+    echo "$val"
+}
+
+# --- SSH 地址验证 ---
+validate_ssh_addr() {
+    local addr="$1"
+    if [[ ! "$addr" =~ ^[a-zA-Z0-9._@:/-]+$ ]]; then
+        echo -e "${RED}无效的 SSH 地址格式${NC}" >&2
+        return 1
+    fi
+    return 0
 }
 
 # --- Shell Profile 检测 (支持 zsh/bash) ---
@@ -356,6 +392,7 @@ setup_openclaw_connection() {
             echo -e "${RED}SSH 地址不能为空${NC}"
             return 1
         fi
+        validate_ssh_addr "$SSH_ADDR" || return 1
         echo -n "  测试 SSH 连接... "
         if ssh -n -o ConnectTimeout=5 "$SSH_ADDR" "echo ok" </dev/null >/dev/null 2>&1; then
             echo -e "${GREEN}OK${NC}"
@@ -465,7 +502,7 @@ for prov in sorted(groups.keys()):
 
         if [ -n "$NEW_DEFAULT" ]; then
             echo -n "  设置默认模型为 ${NEW_DEFAULT}... "
-            SET_RESULT=$(oc_exec "openclaw models set '${NEW_DEFAULT}'")
+            SET_RESULT=$(oc_exec "openclaw models set '$(sanitize_input "${NEW_DEFAULT}")'")
             if echo "$SET_RESULT" | grep -qi "error\|fail"; then
                 echo -e "${RED}失败${NC}"
                 echo "  $SET_RESULT"
@@ -508,7 +545,7 @@ for prov in sorted(groups.keys()):
             local fb_ok=0 fb_fail=0
             echo -n "  添加 ${#FB_ARRAY[@]} 个 fallback 模型..."
             for fb_model in "${FB_ARRAY[@]}"; do
-                ADD_RESULT=$(oc_exec "openclaw models fallbacks add '${fb_model}'" 2>&1)
+                ADD_RESULT=$(oc_exec "openclaw models fallbacks add '$(sanitize_input "${fb_model}")'" 2>&1)
                 if echo "$ADD_RESULT" | grep -qi "error\|fail"; then
                     fb_fail=$((fb_fail + 1))
                 else
@@ -537,7 +574,7 @@ for prov in sorted(groups.keys()):
                     if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#FB_ARRAY[@]}" ]; then
                         fb_model="${FB_ARRAY[$idx]}"
                         echo -n "  添加 fallback: ${fb_model}... "
-                        ADD_RESULT=$(oc_exec "openclaw models fallbacks add '${fb_model}'")
+                        ADD_RESULT=$(oc_exec "openclaw models fallbacks add '$(sanitize_input "${fb_model}")'")
                         if echo "$ADD_RESULT" | grep -qi "error\|fail"; then
                             echo -e "${RED}失败${NC}"
                         else
@@ -625,7 +662,7 @@ run_selftest() {
     verified_date=$(date +%Y-%m-%d)
     local total=0 reachable=0 unreachable=0
     local _results_file
-    _results_file=$(mktemp)
+    _results_file=$(mktemp); _TMPFILES+=("$_results_file")
 
     # 遍历预设 provider（跳过最后一个"自定义 URL"）
     local provider_count=${#PROVIDER_NAMES[@]}
@@ -826,7 +863,7 @@ run_view_config() {
     echo ""
 
     # 用 python 汇总输出
-    _VIEW_SCRIPT=$(mktemp)
+    _VIEW_SCRIPT=$(mktemp); _TMPFILES+=("$_VIEW_SCRIPT")
     cat > "$_VIEW_SCRIPT" << 'PYEOF'
 import json, sys, os
 
@@ -950,7 +987,7 @@ run_factory_reset() {
 
     # 还原: 读取当前配置，只保留 agents/channels/bindings/tools，删除 models 相关
     echo -n "  清除 models 配置... "
-    _RESET_SCRIPT=$(mktemp)
+    _RESET_SCRIPT=$(mktemp); _TMPFILES+=("$_RESET_SCRIPT")
     cat > "$_RESET_SCRIPT" << 'PYEOF'
 import json, os
 
@@ -1151,7 +1188,8 @@ _collect_test_api_input() {
     fi
 
     printf "请粘贴 API Key: "
-    read -r API_KEY
+    read -rs API_KEY
+    echo
     if [ -z "$API_KEY" ]; then
         echo -e "${RED}API Key 不能为空${NC}"; exit 1
     fi
@@ -1385,7 +1423,7 @@ run_diagnose() {
     fi
 
     # Python 诊断分析
-    _DIAG_SCRIPT=$(mktemp)
+    _DIAG_SCRIPT=$(mktemp); _TMPFILES+=("$_DIAG_SCRIPT")
     cat > "$_DIAG_SCRIPT" << 'PYEOF'
 import json, sys, os, time
 
@@ -1615,7 +1653,7 @@ PYEOF
             echo ""
             CLEANUP_LIST=$(echo "$DIAG_RESULT" | grep "^CLEANUP:" | sed 's/^CLEANUP://')
 
-            _CLEANUP_SCRIPT=$(mktemp)
+            _CLEANUP_SCRIPT=$(mktemp); _TMPFILES+=("$_CLEANUP_SCRIPT")
             cat > "$_CLEANUP_SCRIPT" << 'PYEOF'
 import json, sys, os
 
@@ -1737,6 +1775,7 @@ if [ "$DO_DIAGNOSE" = true ]; then
         if [ "$DEPLOY_CHOICE" = "2" ]; then
             printf "SSH 地址 (如 user@host): "
             read -r SSH_ADDR
+            validate_ssh_addr "$SSH_ADDR" || exit 1
             echo -n "  测试 SSH 连接... "
             if ssh -n -o ConnectTimeout=5 "$SSH_ADDR" "echo ok" >/dev/null 2>&1; then
                 echo -e "${GREEN}OK${NC}"
@@ -1819,7 +1858,8 @@ echo ""
 print_step "2/6" "输入 API Key"
 echo ""
 printf "请粘贴 API Key: "
-read -r API_KEY
+read -rs API_KEY
+echo
 if [ -z "$API_KEY" ]; then
     echo -e "${RED}API Key 不能为空${NC}"
     exit 1
@@ -1887,7 +1927,7 @@ fi
 # --- 3c: 解析模型列表 ---
 echo -n "  获取模型列表... "
 
-_PY_SCRIPT=$(mktemp)
+_PY_SCRIPT=$(mktemp); _TMPFILES+=("$_PY_SCRIPT")
 cat > "$_PY_SCRIPT" << 'PYEOF'
 import json, sys, os
 
@@ -2096,7 +2136,7 @@ echo -e "${BOLD}检测模型可达性...${NC} ${DIM}(每个模型超时 10s)${NC
 echo ""
 
 # 逐个测试可达性，结果写入临时文件
-_REACH_FILE=$(mktemp)
+_REACH_FILE=$(mktemp); _TMPFILES+=("$_REACH_FILE")
 REACH_OK=0
 REACH_FAIL=0
 REACH_IDX=0
@@ -2221,7 +2261,7 @@ ENV_VAR_NAME=$(echo "${PROVIDER_NAME}" | tr '[:lower:]-' '[:upper:]_')_API_KEY
 echo -e "  ${DIM}API Key 将通过环境变量 \$${ENV_VAR_NAME} 引用${NC}"
 echo ""
 
-_SETUP_SCRIPT=$(mktemp)
+_SETUP_SCRIPT=$(mktemp); _TMPFILES+=("$_SETUP_SCRIPT")
 cat > "$_SETUP_SCRIPT" << 'PYEOF'
 import json, sys, os, shutil
 
@@ -2294,7 +2334,6 @@ if [[ "$SETUP_RESULT" == OK:* ]]; then
 
     # 写入环境变量
     echo -e "${BOLD}写入 API Key 到环境变量...${NC}"
-    local _profile
     _profile=$(detect_shell_profile "$SSH_PREFIX")
     _write_env_to_profile "$SSH_PREFIX" "$_profile" "$ENV_VAR_NAME" "$API_KEY"
     echo ""
@@ -2401,7 +2440,7 @@ for prov in sorted(groups.keys()):
             fi
             if [ -n "$NEW_DEFAULT" ]; then
                 echo -n "  设置默认模型为 ${NEW_DEFAULT}... "
-                SET_RESULT=$(oc_exec "openclaw models set '${NEW_DEFAULT}'")
+                SET_RESULT=$(oc_exec "openclaw models set '$(sanitize_input "${NEW_DEFAULT}")'")
                 if echo "$SET_RESULT" | grep -qi "error\|fail"; then
                     echo -e "${RED}失败${NC}"
                     echo "  $SET_RESULT"
@@ -2441,7 +2480,7 @@ for prov in sorted(groups.keys()):
                 fb_ok=0; fb_fail=0
                 echo -n "  添加 ${#FB_ARRAY[@]} 个 fallback 模型..."
                 for fb_model in "${FB_ARRAY[@]}"; do
-                    ADD_RESULT=$(oc_exec "openclaw models fallbacks add '${fb_model}'" 2>&1)
+                    ADD_RESULT=$(oc_exec "openclaw models fallbacks add '$(sanitize_input "${fb_model}")'" 2>&1)
                     if echo "$ADD_RESULT" | grep -qi "error\|fail"; then
                         fb_fail=$((fb_fail + 1))
                     else
@@ -2468,7 +2507,7 @@ for prov in sorted(groups.keys()):
                         if [ "$idx" -ge 0 ] && [ "$idx" -lt "${#FB_ARRAY[@]}" ]; then
                             fb_model="${FB_ARRAY[$idx]}"
                             echo -n "  添加 fallback: ${fb_model}... "
-                            ADD_RESULT=$(oc_exec "openclaw models fallbacks add '${fb_model}'")
+                            ADD_RESULT=$(oc_exec "openclaw models fallbacks add '$(sanitize_input "${fb_model}")'")
                             if echo "$ADD_RESULT" | grep -qi "error\|fail"; then
                                 echo -e "${RED}失败${NC}"
                             else
