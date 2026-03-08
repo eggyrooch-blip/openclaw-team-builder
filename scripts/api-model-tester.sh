@@ -530,16 +530,63 @@ run_rollback() {
 
     setup_openclaw_connection || return 1
 
-    # 查找备份文件
-    echo -e "${BOLD}可用备份:${NC}"
-    BACKUPS=$(oc_exec "ls -lt ~/.openclaw/openclaw.json.bak-* ~/.openclaw/openclaw.json.pre-* 2>/dev/null | head -10")
-    if [ -z "$BACKUPS" ]; then
-        echo -e "  ${YELLOW}没有找到备份文件${NC}"
+    local oc_dir="$HOME/.openclaw"
+    local idx=0
+
+    # === 完整备份 (--backup 创建的目录) ===
+    echo -e "${BOLD}完整备份 (--backup 创建):${NC}"
+    local full_backups=""
+    local full_count=0
+    if [ -d "$oc_dir/backups" ]; then
+        full_backups=$(ls -dt "$oc_dir/backups"/backup-* 2>/dev/null | head -5)
+    fi
+    if [ -n "$full_backups" ]; then
+        while IFS= read -r bdir; do
+            idx=$((idx + 1))
+            local bname
+            bname=$(basename "$bdir")
+            local fcount
+            fcount=$(ls "$bdir" 2>/dev/null | wc -l | tr -d ' ')
+            echo -e "  ${CYAN}${idx})${NC} ${GREEN}[完整]${NC} ${bname} (${fcount} 个文件)"
+            # 列出包含的文件
+            ls "$bdir" 2>/dev/null | while read -r f; do
+                echo -e "     ${DIM}$f${NC}"
+            done
+        done <<< "$full_backups"
+        full_count=$idx
+    else
+        echo -e "  ${DIM}(无)${NC}"
+    fi
+    echo ""
+
+    # === 单文件备份 (自动备份的 .bak-* / .pre-*) ===
+    echo -e "${BOLD}单文件备份 (自动创建):${NC}"
+    local single_backups=""
+    single_backups=$(ls -lt "$oc_dir"/openclaw.json.bak-* "$oc_dir"/openclaw.json.pre-* "$oc_dir"/openclaw.json.factory-* 2>/dev/null | head -10)
+    local single_start=$((idx + 1))
+    if [ -n "$single_backups" ]; then
+        echo "$single_backups" | while IFS= read -r line; do
+            idx=$((idx + 1))
+            local fname
+            fname=$(echo "$line" | awk '{print $NF}')
+            local bname
+            bname=$(basename "$fname")
+            echo -e "  ${CYAN}${idx})${NC} ${YELLOW}[仅JSON]${NC} ${bname}"
+        done
+        # 重新计算 idx
+        local single_count
+        single_count=$(echo "$single_backups" | sed '/^$/d' | wc -l | tr -d ' ')
+        idx=$((full_count + single_count))
+    else
+        echo -e "  ${DIM}(无)${NC}"
+    fi
+    echo ""
+
+    if [ "$idx" -eq 0 ]; then
+        echo -e "  ${YELLOW}没有找到任何备份${NC}"
         return 1
     fi
 
-    echo "$BACKUPS" | cat -n
-    echo ""
     printf "选择要恢复的备份编号 (或输入 q 取消): "
     read -r ROLLBACK_CHOICE
 
@@ -548,23 +595,84 @@ run_rollback() {
         return 0
     fi
 
-    BACKUP_FILE=$(echo "$BACKUPS" | sed -n "${ROLLBACK_CHOICE}p" | awk '{print $NF}')
-    if [ -z "$BACKUP_FILE" ]; then
-        echo -e "${RED}无效选择${NC}"
-        return 1
-    fi
+    # 判断选择的是完整备份还是单文件备份
+    if [ "$ROLLBACK_CHOICE" -le "$full_count" ] 2>/dev/null; then
+        # 完整备份恢复
+        local selected_dir
+        selected_dir=$(echo "$full_backups" | sed -n "${ROLLBACK_CHOICE}p")
+        if [ -z "$selected_dir" ] || [ ! -d "$selected_dir" ]; then
+            echo -e "${RED}无效选择${NC}"
+            return 1
+        fi
 
-    echo -e "  将恢复: ${CYAN}${BACKUP_FILE}${NC}"
-    if prompt_yn "确认恢复? (当前配置将备份为 .bak-rollback)"; then
-        ROLL_RESULT=$(oc_exec "cp ~/.openclaw/openclaw.json ~/.openclaw/openclaw.json.bak-rollback && cp '${BACKUP_FILE}' ~/.openclaw/openclaw.json && echo OK")
-        if echo "$ROLL_RESULT" | grep -q "OK"; then
-            echo -e "  ${GREEN}恢复成功${NC}"
+        echo -e "  将恢复完整备份: ${CYAN}$(basename "$selected_dir")${NC}"
+        ls "$selected_dir" | while read -r f; do
+            echo -e "    ${DIM}$f${NC}"
+        done
+
+        if prompt_yn "确认恢复? (当前配置将先备份)"; then
+            # 先备份当前配置
+            run_backup 2>/dev/null
+            echo ""
+
+            local restored=0
+            # 恢复 openclaw.json
+            if [ -f "$selected_dir/openclaw.json" ]; then
+                cp "$selected_dir/openclaw.json" "$oc_dir/openclaw.json"
+                echo -e "  ${GREEN}✓${NC} openclaw.json"
+                restored=$((restored + 1))
+            fi
+            # 恢复 auth-profiles.json
+            if [ -f "$selected_dir/auth-profiles.json" ]; then
+                local auth_dir="$oc_dir/agents/main/agent"
+                mkdir -p "$auth_dir"
+                cp "$selected_dir/auth-profiles.json" "$auth_dir/auth-profiles.json"
+                echo -e "  ${GREEN}✓${NC} auth-profiles.json"
+                restored=$((restored + 1))
+            fi
+            # 恢复 team-hierarchy.json
+            if [ -f "$selected_dir/team-hierarchy.json" ]; then
+                cp "$selected_dir/team-hierarchy.json" "$oc_dir/team-hierarchy.json"
+                echo -e "  ${GREEN}✓${NC} team-hierarchy.json"
+                restored=$((restored + 1))
+            fi
+            # 恢复 gateway plist
+            if [ -f "$selected_dir/ai.openclaw.gateway.plist" ]; then
+                cp "$selected_dir/ai.openclaw.gateway.plist" "$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+                echo -e "  ${GREEN}✓${NC} gateway plist"
+                restored=$((restored + 1))
+            fi
+
+            echo ""
+            echo -e "  ${GREEN}${BOLD}恢复完成: ${restored} 个文件${NC}"
             echo ""
             if prompt_yn "是否重启 Gateway?"; then
                 restart_gateway
             fi
-        else
-            echo -e "  ${RED}恢复失败: ${ROLL_RESULT}${NC}"
+        fi
+    else
+        # 单文件备份恢复 (仅 openclaw.json)
+        local single_idx=$((ROLLBACK_CHOICE - full_count))
+        local BACKUP_FILE
+        BACKUP_FILE=$(echo "$single_backups" | sed -n "${single_idx}p" | awk '{print $NF}')
+        if [ -z "$BACKUP_FILE" ]; then
+            echo -e "${RED}无效选择${NC}"
+            return 1
+        fi
+
+        echo -e "  将恢复: ${CYAN}$(basename "$BACKUP_FILE")${NC} ${YELLOW}(仅 openclaw.json)${NC}"
+        if prompt_yn "确认恢复? (当前配置将备份为 .bak-rollback)"; then
+            cp "$oc_dir/openclaw.json" "$oc_dir/openclaw.json.bak-rollback" 2>/dev/null
+            cp "$BACKUP_FILE" "$oc_dir/openclaw.json"
+            if [ $? -eq 0 ]; then
+                echo -e "  ${GREEN}恢复成功${NC}"
+                echo ""
+                if prompt_yn "是否重启 Gateway?"; then
+                    restart_gateway
+                fi
+            else
+                echo -e "  ${RED}恢复失败${NC}"
+            fi
         fi
     fi
     echo ""
