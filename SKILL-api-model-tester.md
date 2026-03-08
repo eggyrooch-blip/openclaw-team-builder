@@ -174,20 +174,19 @@ $TESTER --factory-reset
 $TESTER --factory-reset --yes
 ```
 
-## Remote Mac mini Server
+## Backup Configuration
 
-Run commands on a remote OpenClaw server via SSH:
+Backup all OpenClaw config files (openclaw.json, auth-profiles, shell profile, gateway plist):
 
 ```bash
-# Health check on remote server
-$TESTER --selftest --ssh kesun@192.168.7.188 --json
+# Interactive backup
+$TESTER --backup
 
-# Diagnose remote configuration
-$TESTER --diagnose --ssh kesun@192.168.7.188 --json
-
-# Interactive wizard on remote
-$TESTER --wizard --ssh kesun@192.168.7.188
+# JSON output
+$TESTER --backup --json
 ```
+
+Keeps last 10 backups in `~/.openclaw/backups/`. Restore with `--rollback`.
 
 ## CLI Flags Reference
 
@@ -209,13 +208,8 @@ $TESTER --wizard --ssh kesun@192.168.7.188
 | `--diagnose --json` | Find auth issues and problems |
 | `--manage-keys` | View/update provider keys |
 | `--view-config` | Display full configuration |
+| `--backup` | Backup all config files |
 | `--factory-reset` | Restore defaults |
-
-### Remote
-
-| Flag | Purpose |
-|------|---------|
-| `--ssh <addr>` | Remote SSH target (e.g. `kesun@192.168.7.188`) |
 
 ## AI Agent Workflow: Adding a New Provider
 
@@ -276,7 +270,6 @@ If user specifies a model:
 - After adding provider, always show `--status --json` to confirm discovery
 - Always offer to set default model after addition
 - Never use `openclaw models add` directly — use the tester script
-- For remote servers, add `--ssh kesun@192.168.7.188` to all commands
 
 ## Supported API Format
 
@@ -327,10 +320,11 @@ $TESTER --diagnose --json
 # Shows expired_profiles, auth failures, cleanup candidates
 ```
 
-### "远程服务器的模型配置有问题，帮我看看"
+### "帮我备份一下配置"
 
 ```bash
-$TESTER --diagnose --ssh kesun@192.168.7.188 --json
+$TESTER --backup --json
+# Returns backup path and file list
 ```
 
 ## Notes
@@ -339,5 +333,4 @@ $TESTER --diagnose --ssh kesun@192.168.7.188 --json
 - Health check (`--selftest`) takes 1-2 seconds
 - Config discovery and testing may take 10-30 seconds depending on provider response time
 - API keys are stored in environment variables (not in config files)
-- Backup/rollback available via the script (check `--help` for details)
-- Run on local machine or via SSH to remote OpenClaw servers
+- Backup/rollback available via the script (`--backup`, `--rollback`)

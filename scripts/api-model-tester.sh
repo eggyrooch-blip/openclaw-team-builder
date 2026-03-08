@@ -33,7 +33,6 @@ set -u
 SCRIPT_VERSION="1.0.0"
 JSON_OUTPUT=false
 AUTO_YES=false
-SSH_TARGET=""
 
 # --- 颜色 ---
 RED='\033[0;31m'
@@ -194,16 +193,12 @@ normalize_base_url() {
 
 # --- 临时文件清理 ---
 _TMPFILES=()
-_cleanup_tmp() { rm -f "${_TMPFILES[@]}" 2>/dev/null; }
+_cleanup_tmp() { rm -f ${_TMPFILES[@]+"${_TMPFILES[@]}"} 2>/dev/null; }
 trap _cleanup_tmp EXIT INT TERM
 
-# --- OpenClaw 远程执行辅助 ---
+# --- OpenClaw 本地执行辅助 ---
 oc_exec() {
-    if [ -n "$SSH_PREFIX" ]; then
-        $SSH_PREFIX "source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null; export PATH=/opt/homebrew/bin:\$PATH && $*" </dev/null 2>&1
-    else
-        bash -c "$*" 2>&1
-    fi
+    bash -c "$*" 2>&1
 }
 
 # --- 安全: 清洁用户输入 (模型名/provider名/路径) ---
@@ -227,48 +222,20 @@ sanitize_input() {
     echo "$val"
 }
 
-# --- SSH 地址验证 ---
-validate_ssh_addr() {
-    local addr="$1"
-    if [[ ! "$addr" =~ ^[a-zA-Z0-9._@:/-]+$ ]]; then
-        echo -e "${RED}无效的 SSH 地址格式${NC}" >&2
-        return 1
-    fi
-    return 0
-}
-
 # --- Shell Profile 检测 (支持 zsh/bash) ---
 detect_shell_profile() {
-    # 用法: detect_shell_profile [ssh_prefix]
-    # 输出 profile 路径到 stdout
-    local ssh_pfx="$1"
-    if [ -n "$ssh_pfx" ]; then
-        # 远程: 优先检测 $SHELL，再 fallback 文件存在
-        local remote_shell
-        remote_shell=$($ssh_pfx 'basename "$SHELL" 2>/dev/null || echo bash' </dev/null 2>/dev/null)
-        if [ "$remote_shell" = "zsh" ]; then
-            echo "$HOME/.zshrc"
-        elif $ssh_pfx "[ -f ~/.zshrc ]" </dev/null 2>/dev/null; then
-            echo "$HOME/.zshrc"
-        else
-            echo "$HOME/.bashrc"
-        fi
+    if [ "$(basename "$SHELL" 2>/dev/null)" = "zsh" ]; then
+        echo "$HOME/.zshrc"
+    elif [ -f "$HOME/.zshrc" ]; then
+        echo "$HOME/.zshrc"
     else
-        if [ "$(basename "$SHELL" 2>/dev/null)" = "zsh" ]; then
-            echo "$HOME/.zshrc"
-        elif [ -f "$HOME/.zshrc" ]; then
-            echo "$HOME/.zshrc"
-        else
-            echo "$HOME/.bashrc"
-        fi
+        echo "$HOME/.bashrc"
     fi
 }
 
 # --- Gateway plist 环境变量注入 (macOS LaunchAgent) ---
 inject_plist_env_vars() {
     # 从 shell profile 读取 _API_KEY 变量，注入到 gateway plist
-    # 用法: inject_plist_env_vars [ssh_prefix]
-    local ssh_pfx="$1"
     local inject_script
     inject_script=$(cat << 'PYEOF'
 import plistlib, os, re
@@ -320,11 +287,7 @@ print(f"OK:{len(env_vars)}")
 PYEOF
 )
     local result
-    if [ -n "$ssh_pfx" ]; then
-        result=$($ssh_pfx "export PATH=/opt/homebrew/bin:\$PATH; python3 -" <<< "$inject_script" </dev/null 2>&1)
-    else
-        result=$(python3 -c "$inject_script" 2>&1)
-    fi
+    result=$(python3 -c "$inject_script" 2>&1)
 
     if [[ "$result" == OK:* ]]; then
         local count="${result#OK:}"
@@ -338,8 +301,6 @@ PYEOF
 
 # --- Gateway 安全重启 (stop + inject + install) ---
 restart_gateway() {
-    # 用法: restart_gateway [ssh_prefix]
-    local ssh_pfx="$1"
     echo -n "  停止 gateway... "
     oc_exec "openclaw gateway stop" >/dev/null 2>&1
     echo -e "${GREEN}OK${NC}"
@@ -348,68 +309,21 @@ restart_gateway() {
     oc_exec "openclaw gateway install --force" >/dev/null 2>&1
     echo -e "${GREEN}OK${NC}"
     # macOS: 注入环境变量到 plist 并重新加载
-    inject_plist_env_vars "$ssh_pfx"
-    # 如果注入了 plist，需要重新加载 LaunchAgent
-    if [ -n "$ssh_pfx" ]; then
-        local uid
-        uid=$($ssh_pfx "id -u" </dev/null 2>/dev/null)
-        $ssh_pfx "launchctl bootout gui/${uid} ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null; sleep 1; launchctl bootstrap gui/${uid} ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null" </dev/null 2>&1
-    else
-        local uid
-        uid=$(id -u)
-        launchctl bootout "gui/${uid}" ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
-        sleep 1
-        launchctl bootstrap "gui/${uid}" ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
-    fi
+    inject_plist_env_vars
+    # 重新加载 LaunchAgent
+    local uid
+    uid=$(id -u)
+    launchctl bootout "gui/${uid}" ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
+    sleep 1
+    launchctl bootstrap "gui/${uid}" ~/Library/LaunchAgents/ai.openclaw.gateway.plist 2>/dev/null
 }
 
 # --- 连接 OpenClaw 辅助 (多处复用) ---
 setup_openclaw_connection() {
-    SSH_PREFIX=""
-
-    # --ssh 参数跳过交互
-    if [ -n "$SSH_TARGET" ]; then
-        DEPLOY_CHOICE="2"
-        SSH_ADDR="$SSH_TARGET"
-    else
-        if [ "$JSON_OUTPUT" = true ]; then
-            # JSON 模式默认本机
-            DEPLOY_CHOICE="1"
-        else
-            echo -e "${BOLD}OpenClaw 部署位置:${NC}"
-            echo "  1) 本机 (localhost)"
-            echo "  2) 远程 SSH"
-            DEPLOY_CHOICE=$(prompt_choice "请选择" "1")
-        fi
-    fi
-
-    if [ "$DEPLOY_CHOICE" = "2" ]; then
-        if [ -z "${SSH_ADDR:-}" ]; then
-            printf "SSH 地址 (如 user@host): "
-            read -r SSH_ADDR
-        fi
-        if [ -z "$SSH_ADDR" ]; then
-            echo -e "${RED}SSH 地址不能为空${NC}"
-            return 1
-        fi
-        validate_ssh_addr "$SSH_ADDR" || return 1
-        echo -n "  测试 SSH 连接... "
-        if ssh -n -o ConnectTimeout=5 "$SSH_ADDR" "echo ok" </dev/null >/dev/null 2>&1; then
-            echo -e "${GREEN}OK${NC}"
-        else
-            echo -e "${RED}失败 — 请检查 SSH 密钥和网络${NC}"
-            return 1
-        fi
-        SSH_PREFIX="ssh ${SSH_ADDR}"
-    fi
-
     # 加载 shell profile 中的环境变量 (API Key 等)
     local _prof
-    _prof=$(detect_shell_profile "$SSH_PREFIX")
-    if [ -z "$SSH_PREFIX" ]; then
-        # 本机: 直接 source
-        [ -f "$_prof" ] && source "$_prof" 2>/dev/null
-    fi
+    _prof=$(detect_shell_profile)
+    [ -f "$_prof" ] && source "$_prof" 2>/dev/null
 
     echo -n "  检测 OpenClaw... "
     OC_VERSION=$(oc_exec "openclaw --version" 2>/dev/null | head -1)
@@ -605,7 +519,7 @@ else:
     echo ""
 
     if prompt_yn "是否重启 Gateway 使配置生效?"; then
-        restart_gateway "$SSH_PREFIX"
+        restart_gateway
     fi
     echo ""
 }
@@ -647,7 +561,7 @@ run_rollback() {
             echo -e "  ${GREEN}恢复成功${NC}"
             echo ""
             if prompt_yn "是否重启 Gateway?"; then
-                restart_gateway "$SSH_PREFIX"
+                restart_gateway
             fi
         else
             echo -e "  ${RED}恢复失败: ${ROLL_RESULT}${NC}"
@@ -787,7 +701,7 @@ PYEOF
 run_status_json() {
     # 非交互，仅本机，直接输出 JSON
     local _prof
-    _prof=$(detect_shell_profile "")
+    _prof=$(detect_shell_profile)
     [ -f "$_prof" ] && source "$_prof" 2>/dev/null
 
     local oc_ver
@@ -947,11 +861,7 @@ if auth_providers:
 
 PYEOF
 
-    if [ -n "$SSH_PREFIX" ]; then
-        OC_STATUS="$OC_STATUS" OC_MODELS="$OC_MODELS" python3 "$_VIEW_SCRIPT" 2>/dev/null
-    else
-        OC_STATUS="$OC_STATUS" OC_MODELS="$OC_MODELS" python3 "$_VIEW_SCRIPT" 2>/dev/null
-    fi
+    OC_STATUS="$OC_STATUS" OC_MODELS="$OC_MODELS" python3 "$_VIEW_SCRIPT" 2>/dev/null
     rm -f "$_VIEW_SCRIPT"
     echo ""
 }
@@ -1005,11 +915,7 @@ with open(config_path, "w") as f:
 print("OK")
 PYEOF
 
-    if [ -n "$SSH_PREFIX" ]; then
-        RESET_RESULT=$($SSH_PREFIX "python3 -" < "$_RESET_SCRIPT" </dev/null 2>&1)
-    else
-        RESET_RESULT=$(python3 "$_RESET_SCRIPT" 2>&1)
-    fi
+    RESET_RESULT=$(python3 "$_RESET_SCRIPT" 2>&1)
     rm -f "$_RESET_SCRIPT"
 
     if echo "$RESET_RESULT" | grep -q "OK"; then
@@ -1043,9 +949,104 @@ PYEOF
     echo ""
 
     if prompt_yn "是否重启 Gateway?"; then
-        restart_gateway "$SSH_PREFIX"
+        restart_gateway
     fi
     echo ""
+}
+
+# --- 独立功能: 备份配置文件 ---
+run_backup() {
+    print_header "备份 OpenClaw 配置"
+
+    local oc_dir="$HOME/.openclaw"
+    local backup_dir="$oc_dir/backups"
+    local timestamp
+    timestamp=$(date +%Y%m%d-%H%M%S)
+    local backup_name="backup-${timestamp}"
+    local backup_path="${backup_dir}/${backup_name}"
+
+    mkdir -p "$backup_path"
+
+    local backed_up=0
+
+    # 1. openclaw.json (核心配置)
+    if [ -f "$oc_dir/openclaw.json" ]; then
+        cp "$oc_dir/openclaw.json" "$backup_path/openclaw.json"
+        backed_up=$((backed_up + 1))
+        echo -e "  ${GREEN}✓${NC} openclaw.json"
+    else
+        echo -e "  ${DIM}-${NC} openclaw.json (不存在)"
+    fi
+
+    # 2. auth-profiles.json (认证信息)
+    local auth_file="$oc_dir/agents/main/agent/auth-profiles.json"
+    if [ -f "$auth_file" ]; then
+        cp "$auth_file" "$backup_path/auth-profiles.json"
+        backed_up=$((backed_up + 1))
+        echo -e "  ${GREEN}✓${NC} auth-profiles.json"
+    else
+        echo -e "  ${DIM}-${NC} auth-profiles.json (不存在)"
+    fi
+
+    # 3. team-hierarchy.json (团队层级)
+    if [ -f "$oc_dir/team-hierarchy.json" ]; then
+        cp "$oc_dir/team-hierarchy.json" "$backup_path/team-hierarchy.json"
+        backed_up=$((backed_up + 1))
+        echo -e "  ${GREEN}✓${NC} team-hierarchy.json"
+    else
+        echo -e "  ${DIM}-${NC} team-hierarchy.json (不存在)"
+    fi
+
+    # 4. shell profile (环境变量 / API Key)
+    local _prof
+    _prof=$(detect_shell_profile)
+    if [ -n "$_prof" ] && [ -f "$_prof" ]; then
+        cp "$_prof" "$backup_path/$(basename "$_prof")"
+        backed_up=$((backed_up + 1))
+        echo -e "  ${GREEN}✓${NC} $(basename "$_prof")"
+    fi
+
+    # 5. gateway plist (LaunchAgent 配置)
+    local plist_file="$HOME/Library/LaunchAgents/ai.openclaw.gateway.plist"
+    if [ -f "$plist_file" ]; then
+        cp "$plist_file" "$backup_path/ai.openclaw.gateway.plist"
+        backed_up=$((backed_up + 1))
+        echo -e "  ${GREEN}✓${NC} gateway plist"
+    fi
+
+    echo ""
+    if [ "$backed_up" -gt 0 ]; then
+        echo -e "  ${GREEN}${BOLD}备份完成: ${backed_up} 个文件${NC}"
+        echo -e "  ${DIM}路径: ${backup_path}/${NC}"
+
+        # 清理旧备份 (保留最近 10 个)
+        local old_backups
+        old_backups=$(ls -dt "$backup_dir"/backup-* 2>/dev/null | tail -n +11)
+        if [ -n "$old_backups" ]; then
+            local old_count
+            old_count=$(echo "$old_backups" | wc -l | tr -d ' ')
+            echo "$old_backups" | while read -r old; do rm -rf "$old"; done
+            echo -e "  ${DIM}已清理 ${old_count} 个旧备份 (保留最近 10 个)${NC}"
+        fi
+
+        # JSON 输出
+        if [ "$JSON_OUTPUT" = true ]; then
+            echo ""
+            python3 -c "
+import json, os
+backup_path = '$backup_path'
+files = os.listdir(backup_path)
+print(json.dumps({
+    'backup_path': backup_path,
+    'timestamp': '$timestamp',
+    'files': files,
+    'file_count': len(files)
+}, indent=2, ensure_ascii=False))
+"
+        fi
+    else
+        echo -e "  ${YELLOW}未找到可备份的文件${NC}"
+    fi
 }
 
 # --- 独立功能: 管理 API Key ---
@@ -1055,17 +1056,13 @@ run_manage_keys() {
     setup_openclaw_connection || return 1
 
     local profile
-    profile=$(detect_shell_profile "$SSH_PREFIX")
+    profile=$(detect_shell_profile)
     echo -e "  Shell Profile: ${CYAN}${profile}${NC}"
     echo ""
 
     # 读取现有 key
     local keys_raw
-    if [ -n "$SSH_PREFIX" ]; then
-        keys_raw=$($SSH_PREFIX "grep '_API_KEY=' '${profile}' 2>/dev/null" </dev/null 2>/dev/null)
-    else
-        keys_raw=$(grep '_API_KEY=' "${profile}" 2>/dev/null)
-    fi
+    keys_raw=$(grep '_API_KEY=' "${profile}" 2>/dev/null)
 
     if [ -z "$keys_raw" ]; then
         echo -e "  ${YELLOW}未找到任何 API Key 环境变量${NC}"
@@ -1113,10 +1110,10 @@ run_manage_keys() {
             echo -e "${RED}不能为空${NC}"; return 1
         fi
 
-        _write_env_to_profile "$SSH_PREFIX" "$profile" "$new_var_name" "$new_var_value"
+        _write_env_to_profile "$profile" "$new_var_name" "$new_var_value"
         echo ""
         if prompt_yn "是否注入 plist 并重启 Gateway?"; then
-            restart_gateway "$SSH_PREFIX"
+            restart_gateway
         fi
     else
         # 替换已有 key
@@ -1132,10 +1129,10 @@ run_manage_keys() {
             echo -e "${RED}不能为空${NC}"; return 1
         fi
 
-        _write_env_to_profile "$SSH_PREFIX" "$profile" "$target_var" "$new_value"
+        _write_env_to_profile "$profile" "$target_var" "$new_value"
         echo ""
         if prompt_yn "是否注入 plist 并重启 Gateway?"; then
-            restart_gateway "$SSH_PREFIX"
+            restart_gateway
         fi
     fi
     echo ""
@@ -1143,15 +1140,11 @@ run_manage_keys() {
 
 # --- 写入单个环境变量到 shell profile ---
 _write_env_to_profile() {
-    local ssh_pfx="$1" profile="$2" var_name="$3" var_value="$4"
+    local profile="$1" var_name="$2" var_value="$3"
     local export_line="export ${var_name}=\"${var_value}\""
 
-    if [ -n "$ssh_pfx" ]; then
-        $ssh_pfx "sed -i '' '/^export ${var_name}=/d' '${profile}' 2>/dev/null; echo '${export_line}' >> '${profile}'" </dev/null 2>&1
-    else
-        sed -i '' "/^export ${var_name}=/d" "${profile}" 2>/dev/null
-        echo "${export_line}" >> "${profile}"
-    fi
+    sed -i '' "/^export ${var_name}=/d" "${profile}" 2>/dev/null
+    echo "${export_line}" >> "${profile}"
     echo -e "  ${GREEN}已写入${NC} ${profile}: export ${var_name}=\"${var_value:0:8}...${var_value: -4}\""
 }
 
@@ -1212,6 +1205,7 @@ DO_ROLLBACK=false
 DO_MANAGE_KEYS=false
 DO_VIEW_CONFIG=false
 DO_FACTORY_RESET=false
+DO_BACKUP=false
 DO_TEST_API=false
 DO_SELFTEST=false
 DO_STATUS=false
@@ -1231,6 +1225,7 @@ _show_help() {
     echo "  $0 --manage-keys                      管理 API Key"
     echo "  $0 --status                           查看当前配置 (等同菜单7)"
     echo "  $0 --selftest                         检测所有预设服务商可达性"
+    echo "  $0 --backup                            备份配置文件"
     echo "  $0 --factory-reset                    还原默认配置"
     echo ""
     echo "  $0 <base_url> <api_key>               快速探测模型列表"
@@ -1241,7 +1236,6 @@ _show_help() {
     echo "通用选项:"
     echo "  --json                                JSON 输出 (供 AI agent 读取)"
     echo "  --yes                                 跳过所有确认提示"
-    echo "  --ssh <addr>                          指定远程 SSH 地址"
     echo "  --help, -h                            显示帮助"
     echo ""
 }
@@ -1251,7 +1245,6 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --json)           JSON_OUTPUT=true ;;
         --yes)            AUTO_YES=true ;;
-        --ssh)            shift; SSH_TARGET="${1:-}" ;;
         --selftest)       DO_SELFTEST=true ;;
         --status)         DO_STATUS=true ;;
         --wizard)         DO_WIZARD=true ;;
@@ -1261,6 +1254,7 @@ while [ $# -gt 0 ]; do
         --test-api)       DO_TEST_API=true ;;
         --manage-keys)    DO_MANAGE_KEYS=true ;;
         --view-config)    DO_VIEW_CONFIG=true ;;
+        --backup)         DO_BACKUP=true ;;
         --factory-reset)  DO_FACTORY_RESET=true ;;
         --test)           DO_TEST=true ;;
         --verbose)        VERBOSE=true; DO_TEST=true ;;
@@ -1282,7 +1276,7 @@ done
 # 无任何 flag 也无位置参数 = 主菜单
 if ! $DO_SELFTEST && ! $DO_STATUS && ! $DO_WIZARD && ! $DO_DIAGNOSE && \
    ! $DO_SET_DEFAULT && ! $DO_ROLLBACK && ! $DO_MANAGE_KEYS && \
-   ! $DO_VIEW_CONFIG && ! $DO_FACTORY_RESET && ! $DO_TEST_API && \
+   ! $DO_VIEW_CONFIG && ! $DO_FACTORY_RESET && ! $DO_BACKUP && ! $DO_TEST_API && \
    ! $DO_TEST && ! $DO_SETUP && [ -z "$RAW_URL" ]; then
     DO_MENU=true
 fi
@@ -1316,6 +1310,9 @@ if [ "$DO_MENU" = true ]; then
     echo -e "  ${CYAN}8)${NC} ${BOLD}还原默认配置${NC}"
     echo -e "     ${DIM}清除所有自定义 provider，恢复出厂状态 (自动备份)${NC}"
     echo ""
+    echo -e "  ${CYAN}9)${NC} ${BOLD}备份配置文件${NC}"
+    echo -e "     ${DIM}备份 openclaw.json + auth-profiles + shell profile${NC}"
+    echo ""
     MENU_CHOICE=$(prompt_choice "请选择" "1")
     case "$MENU_CHOICE" in
         1) DO_WIZARD=true ;;
@@ -1326,6 +1323,7 @@ if [ "$DO_MENU" = true ]; then
         6) DO_MANAGE_KEYS=true ;;
         7) DO_VIEW_CONFIG=true ;;
         8) DO_FACTORY_RESET=true ;;
+        9) DO_BACKUP=true ;;
         *) echo -e "${RED}无效选择${NC}"; exit 1 ;;
     esac
 fi
@@ -1370,6 +1368,11 @@ if [ "$DO_FACTORY_RESET" = true ]; then
     exit 0
 fi
 
+if [ "$DO_BACKUP" = true ]; then
+    run_backup
+    exit 0
+fi
+
 if [ "$DO_TEST_API" = true ]; then
     _collect_test_api_input
     # fall through to connectivity section below
@@ -1379,8 +1382,6 @@ fi
 # 诊断模式
 # =============================================
 run_diagnose() {
-    local ssh_pfx="$1"
-
     if [ "$JSON_OUTPUT" != true ]; then
         print_header "OpenClaw 模型 & 认证诊断"
         echo -n "  检测 OpenClaw... "
@@ -1388,11 +1389,7 @@ run_diagnose() {
 
     # 检测 openclaw
     local oc_ver
-    if [ -n "$ssh_pfx" ]; then
-        oc_ver=$($ssh_pfx "export PATH=/opt/homebrew/bin:\$PATH && openclaw --version" 2>/dev/null | head -1)
-    else
-        oc_ver=$(openclaw --version 2>/dev/null | head -1)
-    fi
+    oc_ver=$(openclaw --version 2>/dev/null | head -1)
     if [ -z "$oc_ver" ]; then
         if [ "$JSON_OUTPUT" = true ]; then
             echo '{"error": "openclaw not found"}'
@@ -1408,19 +1405,11 @@ run_diagnose() {
 
     # 获取完整状态
     local status_json
-    if [ -n "$ssh_pfx" ]; then
-        status_json=$($ssh_pfx "export PATH=/opt/homebrew/bin:\$PATH && openclaw models status --json 2>/dev/null")
-    else
-        status_json=$(openclaw models status --json 2>/dev/null)
-    fi
+    status_json=$(openclaw models status --json 2>/dev/null)
 
     # 获取 auth-profiles.json
     local profiles_json
-    if [ -n "$ssh_pfx" ]; then
-        profiles_json=$($ssh_pfx "cat ~/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null")
-    else
-        profiles_json=$(cat ~/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null)
-    fi
+    profiles_json=$(cat ~/.openclaw/agents/main/agent/auth-profiles.json 2>/dev/null)
 
     # Python 诊断分析
     _DIAG_SCRIPT=$(mktemp); _TMPFILES+=("$_DIAG_SCRIPT")
@@ -1714,12 +1703,7 @@ for r in removed:
     print(f"REMOVED:{r}")
 PYEOF
 
-            if [ -n "$ssh_pfx" ]; then
-                ENCODED_SCRIPT=$(base64 < "$_CLEANUP_SCRIPT")
-                CLEANUP_RESULT=$($ssh_pfx "echo '${ENCODED_SCRIPT}' | base64 -d | CLEANUP_IDS='${CLEANUP_LIST}' python3 -" 2>&1)
-            else
-                CLEANUP_RESULT=$(CLEANUP_IDS="${CLEANUP_LIST}" python3 "$_CLEANUP_SCRIPT" 2>&1)
-            fi
+            CLEANUP_RESULT=$(CLEANUP_IDS="${CLEANUP_LIST}" python3 "$_CLEANUP_SCRIPT" 2>&1)
             rm -f "$_CLEANUP_SCRIPT"
 
             if [[ "$CLEANUP_RESULT" == OK:* ]]; then
@@ -1753,41 +1737,14 @@ PYEOF
 
     if prompt_yn "是否重启 Gateway?"; then
         echo ""
-        restart_gateway "$ssh_pfx"
+        restart_gateway
     fi
     echo ""
 }
 
 # --- 运行诊断 (独立模式) ---
 if [ "$DO_DIAGNOSE" = true ]; then
-    DIAG_SSH=""
-    if [ "$JSON_OUTPUT" = true ]; then
-        # JSON 模式: 跳过交互，使用 --ssh 参数或默认本机
-        if [ -n "$SSH_TARGET" ]; then
-            DIAG_SSH="ssh -n ${SSH_TARGET}"
-        fi
-    else
-        echo -e "${BOLD}OpenClaw 部署位置:${NC}"
-        echo "  1) 本机 (localhost)"
-        echo "  2) 远程 SSH"
-        DEPLOY_CHOICE=$(prompt_choice "请选择" "1")
-
-        if [ "$DEPLOY_CHOICE" = "2" ]; then
-            printf "SSH 地址 (如 user@host): "
-            read -r SSH_ADDR
-            validate_ssh_addr "$SSH_ADDR" || exit 1
-            echo -n "  测试 SSH 连接... "
-            if ssh -n -o ConnectTimeout=5 "$SSH_ADDR" "echo ok" >/dev/null 2>&1; then
-                echo -e "${GREEN}OK${NC}"
-            else
-                echo -e "${RED}失败${NC}"
-                exit 1
-            fi
-            DIAG_SSH="ssh -n ${SSH_ADDR}"
-        fi
-    fi
-
-    run_diagnose "$DIAG_SSH"
+    run_diagnose
     exit 0
 fi
 
@@ -2319,11 +2276,7 @@ with open(config_path, "w") as f:
 print(f"OK:{len(model_entries)}:{backup_path}")
 PYEOF
 
-if [ -n "$SSH_PREFIX" ]; then
-    SETUP_RESULT=$($SSH_PREFIX "PROVIDER_NAME='${PROVIDER_NAME}' BASE_URL='${BASE_URL}' ENV_VAR_NAME='${ENV_VAR_NAME}' SELECTED_MODELS='${SELECTED_MODELS}' python3 -" < "$_SETUP_SCRIPT" 2>&1)
-else
-    SETUP_RESULT=$(PROVIDER_NAME="${PROVIDER_NAME}" BASE_URL="${BASE_URL}" ENV_VAR_NAME="${ENV_VAR_NAME}" SELECTED_MODELS="${SELECTED_MODELS}" python3 "$_SETUP_SCRIPT" 2>&1)
-fi
+SETUP_RESULT=$(PROVIDER_NAME="${PROVIDER_NAME}" BASE_URL="${BASE_URL}" ENV_VAR_NAME="${ENV_VAR_NAME}" SELECTED_MODELS="${SELECTED_MODELS}" python3 "$_SETUP_SCRIPT" 2>&1)
 rm -f "$_SETUP_SCRIPT"
 
 # --- 写入环境变量到 shell profile ---
@@ -2334,8 +2287,8 @@ if [[ "$SETUP_RESULT" == OK:* ]]; then
 
     # 写入环境变量
     echo -e "${BOLD}写入 API Key 到环境变量...${NC}"
-    _profile=$(detect_shell_profile "$SSH_PREFIX")
-    _write_env_to_profile "$SSH_PREFIX" "$_profile" "$ENV_VAR_NAME" "$API_KEY"
+    _profile=$(detect_shell_profile)
+    _write_env_to_profile "$_profile" "$ENV_VAR_NAME" "$API_KEY"
     echo ""
     echo -e "  ${DIM}提示: 新终端会自动加载。当前终端需执行: source ${_profile}${NC}"
     echo -e "  ${DIM}openclaw.json 中不存储明文 key，仅引用 \${${ENV_VAR_NAME}}${NC}"
@@ -2374,7 +2327,7 @@ if prompt_yn "是否设置默认模型和 Fallback?"; then
     if [ "$DO_WIZARD" = true ]; then
         print_step "5/6" "设置默认模型 & Fallback"
     fi
-    # 复用独立功能 (SSH_PREFIX 已由 setup_openclaw_connection 设置)
+    # 复用独立功能
     # 获取当前状态
     OC_STATUS=$(oc_exec "openclaw models status --json")
     CURRENT_DEFAULT=$(echo "$OC_STATUS" | python3 -c "import json,sys; print(json.loads(sys.stdin.read()).get('defaultModel',''))" 2>/dev/null)
@@ -2545,7 +2498,7 @@ echo ""
 
 if prompt_yn "是否重启 Gateway 使配置生效?"; then
     echo ""
-    restart_gateway "$SSH_PREFIX"
+    restart_gateway
     sleep 3
     echo -n "  检查 health... "
     HEALTH=$(oc_exec "openclaw health" 2>/dev/null | head -1)
