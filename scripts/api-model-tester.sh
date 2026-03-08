@@ -678,6 +678,625 @@ run_rollback() {
     echo ""
 }
 
+# --- 独立功能: 已配置 Provider 全面体检 ---
+run_checkup() {
+    local verified_date
+    verified_date=$(date +%Y-%m-%d)
+    local _prof
+    _prof=$(detect_shell_profile)
+    [ -f "$_prof" ] && source "$_prof" 2>/dev/null
+
+    # 需要 openclaw
+    if ! command -v openclaw &>/dev/null; then
+        if [ "$JSON_OUTPUT" = true ]; then
+            echo '{"error": "openclaw not found"}'
+        else
+            echo -e "  ${RED}错误: openclaw 未安装${NC}"
+        fi
+        return 1
+    fi
+
+    local oc_status oc_config_raw
+    oc_status=$(openclaw models status --json 2>/dev/null)
+    oc_config_raw=$(cat ~/.openclaw/openclaw.json 2>/dev/null)
+
+    if [ -z "$oc_status" ]; then
+        if [ "$JSON_OUTPUT" = true ]; then
+            echo '{"error": "cannot read openclaw config"}'
+        else
+            echo -e "  ${RED}错误: 无法读取 OpenClaw 配置${NC}"
+        fi
+        return 1
+    fi
+
+    local _results_file
+    _results_file=$(mktemp); _TMPFILES+=("$_results_file")
+
+    if [ "$JSON_OUTPUT" != true ]; then
+        print_header "已配置 Provider 全面体检"
+        echo -e "  ${DIM}检测日期: ${verified_date} | 对每个 Provider 发送真实 API 请求${NC}"
+        echo ""
+    fi
+
+    # 用 python 解析配置，提取 provider 信息，逐个测试
+    OC_STATUS="$oc_status" OC_CONFIG="$oc_config_raw" RESULTS_FILE="$_results_file" \
+    JSON_OUT="$JSON_OUTPUT" VERIFIED_DATE="$verified_date" SCRIPT_VER="$SCRIPT_VERSION" \
+    python3 << 'PYEOF'
+import json, os, subprocess, time, sys
+
+oc_status = json.loads(os.environ.get("OC_STATUS", "{}"))
+results_file = os.environ["RESULTS_FILE"]
+json_out = os.environ.get("JSON_OUT", "false") == "true"
+verified_date = os.environ["VERIFIED_DATE"]
+script_ver = os.environ["SCRIPT_VER"]
+
+# Parse config for custom providers
+try:
+    oc_config = json.loads(os.environ.get("OC_CONFIG", "{}"))
+except:
+    oc_config = {}
+
+# Smart test model selection: prefer known-good chat models, skip image/embedding/audio
+def pick_best_test_model(models_list, provider_name=""):
+    """Pick a model most likely to succeed for a chat completion test."""
+    if not models_list:
+        return ""
+    # Preferred model patterns (chat-friendly, likely available)
+    prefer_patterns = [
+        "qwen-max", "qwen-plus", "qwen-turbo",
+        "glm-4", "glm-5", "deepseek-v3", "deepseek-r1",
+        "gpt-4", "gpt-3.5", "llama-3", "llama3",
+        "doubao-pro", "doubao-lite",
+        "claude", "mixtral", "mistral", "gemma",
+    ]
+    # Skip patterns (non-chat models)
+    skip_patterns = [
+        "embed", "whisper", "tts", "dall", "image", "audio", "video",
+        "rerank", "moderation", "vision", "vl-", "ocr", "asr",
+        "stable-diffusion", "flux", "cogview", "wanx",
+    ]
+    ids = [m["id"] if isinstance(m, dict) else m for m in models_list]
+    # Filter: skip non-chat models AND models with "/" (cross-provider refs)
+    chat_ids = [mid for mid in ids
+                if not any(sp in mid.lower() for sp in skip_patterns)
+                and "/" not in mid]
+    if not chat_ids:
+        # Retry allowing "/" but still filtering non-chat
+        chat_ids = [mid for mid in ids
+                    if not any(sp in mid.lower() for sp in skip_patterns)]
+    if not chat_ids:
+        chat_ids = ids
+    # Try preferred patterns first
+    for pattern in prefer_patterns:
+        for mid in chat_ids:
+            if pattern in mid.lower():
+                return mid
+    return chat_ids[0]
+
+# Detect gateway port from config
+gateway_port = oc_config.get("gateway", {}).get("port", 18789)
+
+# Collect providers to test
+providers_to_test = []
+
+# 1. Custom providers from openclaw.json models.providers
+custom_providers = oc_config.get("models", {}).get("providers", {})
+if isinstance(custom_providers, dict):
+    for pname, pconfig in custom_providers.items():
+        base_url = pconfig.get("baseUrl", "")
+        api_key_ref = pconfig.get("apiKey", "")
+        models = pconfig.get("models", [])
+        api_key = api_key_ref
+        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
+            env_name = api_key[2:-1]
+            api_key = os.environ.get(env_name, "")
+        test_model = pick_best_test_model(models, pname)
+        if base_url:
+            providers_to_test.append({
+                "name": pname,
+                "type": "custom",
+                "base_url": base_url,
+                "api_key": api_key,
+                "test_model": test_model,
+                "model_count": len(models),
+            })
+elif isinstance(custom_providers, list):
+    for pconfig in custom_providers:
+        pname = pconfig.get("name", "unknown")
+        base_url = pconfig.get("baseUrl", "")
+        api_key_ref = pconfig.get("apiKey", "")
+        models = pconfig.get("models", [])
+        api_key = api_key_ref
+        if isinstance(api_key, str) and api_key.startswith("${") and api_key.endswith("}"):
+            env_name = api_key[2:-1]
+            api_key = os.environ.get(env_name, "")
+        test_model = pick_best_test_model(models, pname)
+        if base_url:
+            providers_to_test.append({
+                "name": pname,
+                "type": "custom",
+                "base_url": base_url,
+                "api_key": api_key,
+                "test_model": test_model,
+                "model_count": len(models),
+            })
+
+# 2. Built-in providers from auth info (anthropic, etc.)
+# Test via gateway with provider-prefixed model name
+auth_providers = oc_status.get("auth", {}).get("providers", [])
+custom_names = {p["name"] for p in providers_to_test}
+for ap in auth_providers:
+    pname = ap.get("provider", "")
+    if pname in custom_names:
+        continue
+    eff = ap.get("effective", {})
+    auth_detail = eff.get("detail", "")
+    providers_to_test.append({
+        "name": pname,
+        "type": "builtin",
+        "base_url": "",
+        "api_key": auth_detail if auth_detail else "configured",
+        "test_model": "",
+        "model_count": 0,
+    })
+
+# Get fallback models per provider for testing
+fallbacks = oc_status.get("fallbacks", [])
+default_model = oc_status.get("defaultModel", "")
+models_by_provider = {}
+if default_model:
+    dp = default_model.split("/")[0]
+    models_by_provider.setdefault(dp, []).append(default_model)
+for fb in fallbacks:
+    fp = fb.split("/", 1)[0]
+    models_by_provider.setdefault(fp, []).append(fb)
+
+# Fill in test_model for providers that don't have one
+for p in providers_to_test:
+    if not p["test_model"] and p["name"] in models_by_provider:
+        candidates = models_by_provider[p["name"]]
+        # For builtin providers tested via gateway, use full key (provider/model)
+        if p["type"] == "builtin":
+            chat_candidates = [c for c in candidates
+                               if not any(s in c.lower() for s in ["embed", "vision", "image", "audio", "tts"])]
+            p["test_model"] = chat_candidates[0] if chat_candidates else candidates[0]
+        else:
+            full_key = candidates[0]
+            p["test_model"] = full_key.split("/", 1)[-1] if "/" in full_key else full_key
+    if not p["model_count"] and p["name"] in models_by_provider:
+        p["model_count"] = len(models_by_provider[p["name"]])
+
+# Test each provider
+results = []
+total = 0
+ok_count = 0
+auth_fail_count = 0
+error_count = 0
+
+# ANSI colors for TUI
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+DIM = "\033[2m"
+NC = "\033[0m"
+BOLD = "\033[1m"
+
+for p in providers_to_test:
+    total += 1
+    result = {
+        "name": p["name"],
+        "type": p["type"],
+        "test_model": p["test_model"],
+        "model_count": p["model_count"],
+        "status": "unknown",
+        "http_code": 0,
+        "latency_ms": 0,
+        "error": "",
+        "has_key": bool(p["api_key"]),
+    }
+
+    if not p["api_key"]:
+        result["status"] = "no_key"
+        result["error"] = "API Key 未设置或环境变量为空"
+        error_count += 1
+        results.append(result)
+        if not json_out:
+            print(f"  {RED}✗{NC} {p['name']:24s}  ---   API Key 未设置")
+        continue
+
+    # Test: real chat completion call
+    base_url = p["base_url"]
+    test_model = p["test_model"]
+
+    if not test_model:
+        result["status"] = "skipped"
+        result["error"] = "无可测试模型"
+        results.append(result)
+        if not json_out:
+            print(f"  {DIM}-{NC} {p['name']:24s}  ---   {DIM}跳过（无可测试模型）{NC}")
+        continue
+
+    # Builtin providers: test via native API
+    if not base_url:
+        # Map well-known builtin providers to their API endpoints
+        builtin_apis = {
+            "anthropic": {
+                "url": "https://api.anthropic.com/v1/messages",
+                "headers": ["-H", "anthropic-version: 2023-06-01"],
+                "auth_header": "x-api-key",
+                "body": {"model": test_model.split("/")[-1], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+            },
+            "openai": {
+                "url": "https://api.openai.com/v1/chat/completions",
+                "headers": [],
+                "auth_header": "Authorization",
+                "body": {"model": test_model.split("/")[-1], "messages": [{"role": "user", "content": "hi"}], "max_tokens": 5},
+            },
+        }
+        api_info = builtin_apis.get(p["name"])
+        if not api_info:
+            result["status"] = "skipped"
+            result["error"] = f"内置 Provider ({p['name']}) 暂不支持直接测试"
+            results.append(result)
+            if not json_out:
+                print(f"  {DIM}-{NC} {p['name']:24s}  ---   {DIM}跳过（暂不支持直接测试）{NC}")
+            continue
+
+        # Extract actual API key from auth detail (may be masked like "sk-ant-api03-...")
+        api_key = p["api_key"]
+        # Try env vars for well-known key names
+        if not api_key or api_key == "configured" or "..." in api_key:
+            env_names = {
+                "anthropic": ["ANTHROPIC_API_KEY"],
+                "openai": ["OPENAI_API_KEY"],
+            }
+            for env_name in env_names.get(p["name"], []):
+                val = os.environ.get(env_name, "")
+                if val:
+                    api_key = val
+                    break
+
+        if not api_key or api_key == "configured":
+            result["status"] = "no_key"
+            result["error"] = "无法获取 API Key（可能在 auth-profiles 中加密存储）"
+            results.append(result)
+            if not json_out:
+                print(f"  {YELLOW}~{NC} {p['name']:24s}  ---   {DIM}Key 在 auth-profiles 中，跳过直接测试{NC}")
+            continue
+
+        try:
+            start = time.time()
+            auth_h = f"Bearer {api_key}" if api_info["auth_header"] == "Authorization" else api_key
+            cmd = ["curl", "-s", "-w", "\n%{http_code}", "--connect-timeout", "5", "--max-time", "15",
+                   "-H", f"{api_info['auth_header']}: {auth_h}",
+                   "-H", "Content-Type: application/json",
+                   ] + api_info["headers"] + [
+                   "-d", json.dumps(api_info["body"]),
+                   api_info["url"]]
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            lines = r.stdout.strip().split("\n")
+            http_code = lines[-1] if lines else "000"
+            latency = int((time.time() - start) * 1000)
+            result["http_code"] = int(http_code) if http_code.isdigit() else 0
+            result["latency_ms"] = latency
+
+            if http_code == "200":
+                result["status"] = "ok"
+                ok_count += 1
+                if not json_out:
+                    print(f"  {GREEN}✓{NC} {p['name']:24s} {latency:>5d}ms  {DIM}({test_model}) 直连 API{NC}")
+            elif http_code in ("401", "403"):
+                result["status"] = "auth_fail"
+                result["error"] = f"认证失败 (HTTP {http_code}) — Key 过期或网络受限"
+                auth_fail_count += 1
+                if not json_out:
+                    print(f"  {RED}✗{NC} {p['name']:24s}  {RED}{http_code}{NC}   {YELLOW}认证失败 — 检查 Key 或网络{NC}")
+            elif http_code == "429":
+                result["status"] = "rate_limited"
+                result["http_code"] = 429
+                result["error"] = "速率限制"
+                ok_count += 1
+                if not json_out:
+                    print(f"  {YELLOW}~{NC} {p['name']:24s}  {YELLOW}429{NC}   限流中（Provider 可用）")
+            elif http_code == "000":
+                result["status"] = "timeout"
+                result["error"] = "连接失败（网络不通或被墙）"
+                error_count += 1
+                if not json_out:
+                    print(f"  {RED}✗{NC} {p['name']:24s}  ---   {RED}连接失败（网络/防火墙）{NC}")
+            else:
+                result["status"] = "error"
+                result["error"] = f"HTTP {http_code}"
+                error_count += 1
+                if not json_out:
+                    print(f"  {RED}✗{NC} {p['name']:24s}  {RED}{http_code}{NC}   异常响应")
+        except subprocess.TimeoutExpired:
+            result["status"] = "timeout"
+            result["error"] = "请求超时"
+            error_count += 1
+            if not json_out:
+                print(f"  {RED}✗{NC} {p['name']:24s}  ---   请求超时")
+        except Exception as e:
+            result["status"] = "error"
+            result["error"] = str(e)[:80]
+            error_count += 1
+            if not json_out:
+                print(f"  {RED}✗{NC} {p['name']:24s}  ---   {str(e)[:40]}")
+        results.append(result)
+        continue
+
+    try:
+        is_gateway = (p["type"] == "builtin")
+        auth_header = [] if is_gateway else ["-H", f"Authorization: Bearer {p['api_key']}"]
+
+        start = time.time()
+        # Test /models endpoint first (fast, checks auth) — skip for gateway
+        if is_gateway:
+            # Gateway doesn't need /models check, go straight to chat
+            http_code = "200"
+            latency = 0
+        else:
+            cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                "--connect-timeout", "5", "--max-time", "10"] + auth_header + [f"{base_url}/models"]
+            http_code = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout.strip()
+            latency = int((time.time() - start) * 1000)
+
+        result["http_code"] = int(http_code) if http_code.isdigit() else 0
+        result["latency_ms"] = latency
+
+        if http_code == "200":
+            # Further test: actual chat completion
+            start2 = time.time()
+            chat_cmd = ["curl", "-s", "-w", "\n%{http_code}", "--connect-timeout", "5", "--max-time", "15",
+                ] + auth_header + [
+                "-H", "Content-Type: application/json",
+                "-d", json.dumps({
+                    "model": test_model,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 5
+                }),
+                f"{base_url}/chat/completions"
+            ]
+            chat_result = subprocess.run(chat_cmd, capture_output=True, text=True, timeout=20)
+            chat_lines = chat_result.stdout.strip().split("\n")
+            chat_code = chat_lines[-1] if chat_lines else "000"
+            chat_latency = int((time.time() - start2) * 1000)
+
+            if chat_code == "200":
+                result["status"] = "ok"
+                result["latency_ms"] = chat_latency
+                ok_count += 1
+                if not json_out:
+                    print(f"  {GREEN}✓{NC} {p['name']:24s} {chat_latency:>5d}ms  {DIM}({test_model}){NC}")
+            elif chat_code in ("401", "403"):
+                result["status"] = "auth_fail"
+                result["http_code"] = int(chat_code)
+                result["error"] = f"模型 {test_model} 认证失败 (HTTP {chat_code})"
+                auth_fail_count += 1
+                if not json_out:
+                    print(f"  {RED}✗{NC} {p['name']:24s}  {RED}{chat_code}{NC}   {YELLOW}Key 无效或模型无权限 ({test_model}){NC}")
+            elif chat_code == "429":
+                result["status"] = "rate_limited"
+                result["http_code"] = 429
+                result["error"] = "速率限制"
+                ok_count += 1  # Provider works, just rate limited
+                if not json_out:
+                    print(f"  {YELLOW}~{NC} {p['name']:24s}  {YELLOW}429{NC}   限流中（Provider 可用）")
+            else:
+                result["status"] = "model_error"
+                result["http_code"] = int(chat_code) if chat_code.isdigit() else 0
+                result["error"] = f"模型调用失败 (HTTP {chat_code})"
+                # /models OK but chat failed — key works, model might not
+                ok_count += 1
+                if not json_out:
+                    print(f"  {YELLOW}~{NC} {p['name']:24s}  {YELLOW}{chat_code}{NC}   {DIM}平台可用，模型 {test_model} 不可调用{NC}")
+
+        elif http_code in ("401", "403"):
+            result["status"] = "auth_fail"
+            result["error"] = f"API Key 认证失败 (HTTP {http_code})"
+            auth_fail_count += 1
+            if not json_out:
+                print(f"  {RED}✗{NC} {p['name']:24s}  {RED}{http_code}{NC}   {YELLOW}API Key 失效或过期{NC}")
+        else:
+            result["status"] = "error"
+            result["error"] = f"异常响应 (HTTP {http_code})"
+            error_count += 1
+            if not json_out:
+                print(f"  {RED}✗{NC} {p['name']:24s}  {RED}{http_code}{NC}   异常响应")
+
+    except subprocess.TimeoutExpired:
+        result["status"] = "timeout"
+        result["error"] = "连接超时"
+        error_count += 1
+        if not json_out:
+            print(f"  {RED}✗{NC} {p['name']:24s}  ---   连接超时")
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+        error_count += 1
+        if not json_out:
+            print(f"  {RED}✗{NC} {p['name']:24s}  ---   {str(e)[:40]}")
+
+    results.append(result)
+
+# --- Extra diagnostics ---
+warnings = []
+
+# Check 1: Trailing slash in base_url (causes double-slash 404s)
+for p in providers_to_test:
+    if p.get("base_url", "").endswith("/"):
+        warnings.append({
+            "type": "trailing_slash",
+            "provider": p["name"],
+            "detail": f"base_url 末尾有斜杠: {p['base_url']} → 可能导致 /v1//models 404"
+        })
+
+# Check 2: Shell env vs LaunchAgent plist env mismatch
+plist_path = os.path.expanduser("~/Library/LaunchAgents/ai.openclaw.gateway.plist")
+if os.path.exists(plist_path):
+    try:
+        import plistlib
+        with open(plist_path, "rb") as f:
+            plist = plistlib.load(f)
+        plist_env = plist.get("EnvironmentVariables", {})
+        # Check each custom provider's env var
+        custom_providers_raw = oc_config.get("models", {}).get("providers", {})
+        env_vars_needed = set()
+        if isinstance(custom_providers_raw, dict):
+            for pc in custom_providers_raw.values():
+                ak = pc.get("apiKey", "")
+                if isinstance(ak, str) and ak.startswith("${") and ak.endswith("}"):
+                    env_vars_needed.add(ak[2:-1])
+        for var in env_vars_needed:
+            shell_val = os.environ.get(var, "")
+            plist_val = plist_env.get(var, "")
+            if shell_val and not plist_val:
+                warnings.append({
+                    "type": "env_mismatch",
+                    "provider": var,
+                    "detail": f"{var} 在 Shell 中有值，但 Gateway plist 中缺失 → Gateway 启动会报 MissingEnvVarError"
+                })
+            elif shell_val and plist_val and shell_val != plist_val:
+                warnings.append({
+                    "type": "env_mismatch",
+                    "provider": var,
+                    "detail": f"{var} Shell 和 plist 值不同步 → Gateway 可能用旧 Key"
+                })
+    except Exception:
+        pass
+
+# Check 3: API Key trailing whitespace/newlines
+for p in providers_to_test:
+    key = p.get("api_key", "")
+    if key and key != "configured" and (key != key.strip()):
+        warnings.append({
+            "type": "key_whitespace",
+            "provider": p["name"],
+            "detail": f"{p['name']} 的 API Key 包含多余空格或换行符 → 会导致认证失败"
+        })
+
+# Check 4: base_url missing or doubled /v1
+for p in providers_to_test:
+    url = p.get("base_url", "")
+    if not url:
+        continue
+    # Check for doubled /v1/v1
+    if "/v1/v1" in url:
+        warnings.append({
+            "type": "url_double_v1",
+            "provider": p["name"],
+            "detail": f"base_url 包含重复 /v1: {url} → 请求路径会变成 /v1/v1/chat/completions"
+        })
+    # Check for missing /v1 (URL ends without path or with just /)
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/")
+    if not path or path == "":
+        warnings.append({
+            "type": "url_missing_v1",
+            "provider": p["name"],
+            "detail": f"base_url 可能缺少 /v1 路径: {url} → 如果请求 404 请检查是否需要添加 /v1"
+        })
+
+# Check 5: Zombie gateway process (PID exists but not responding)
+try:
+    gateway_port = oc_config.get("gateway", {}).get("port", 18789)
+    # Find process on the gateway port
+    lsof_result = subprocess.run(
+        ["lsof", "-i", f":{gateway_port}", "-t"],
+        capture_output=True, text=True, timeout=5
+    )
+    pids = [p.strip() for p in lsof_result.stdout.strip().split("\n") if p.strip()]
+    if pids:
+        # Port is in use, check if process responds
+        health_cmd = ["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}",
+                      "--connect-timeout", "3", "--max-time", "5",
+                      f"http://localhost:{gateway_port}/v1/models"]
+        health_result = subprocess.run(health_cmd, capture_output=True, text=True, timeout=8)
+        health_code = health_result.stdout.strip()
+        if health_code == "000":
+            warnings.append({
+                "type": "zombie_gateway",
+                "provider": "gateway",
+                "detail": f"Gateway 进程 (PID {','.join(pids)}) 占用端口 {gateway_port} 但不响应 HTTP → 可能是僵尸进程，需要 stop + install --force"
+            })
+    else:
+        # No process on port — gateway might not be running
+        warnings.append({
+            "type": "gateway_down",
+            "provider": "gateway",
+            "detail": f"端口 {gateway_port} 无进程监听 → Gateway 可能未启动，运行: openclaw gateway install --force"
+        })
+except Exception:
+    pass
+
+# Check 6: OpenRouter credit balance (if openrouter configured)
+for p in providers_to_test:
+    if p["name"] == "openrouter" and p.get("api_key"):
+        try:
+            bal_cmd = ["curl", "-s", "--connect-timeout", "5", "--max-time", "10",
+                       "-H", f"Authorization: Bearer {p['api_key']}",
+                       "https://openrouter.ai/api/v1/auth/key"]
+            bal_result = subprocess.run(bal_cmd, capture_output=True, text=True, timeout=12)
+            bal_data = json.loads(bal_result.stdout)
+            usage = bal_data.get("data", {}).get("usage", 0)
+            limit = bal_data.get("data", {}).get("limit", None)
+            if limit is not None and limit > 0:
+                remaining = limit - usage
+                if remaining <= 0:
+                    warnings.append({
+                        "type": "quota_exhausted",
+                        "provider": "openrouter",
+                        "detail": f"OpenRouter 额度已用完: ${usage:.2f}/${limit:.2f}"
+                    })
+                elif remaining < limit * 0.1:
+                    warnings.append({
+                        "type": "quota_low",
+                        "provider": "openrouter",
+                        "detail": f"OpenRouter 额度即将耗尽: 剩余 ${remaining:.2f} (已用 ${usage:.2f}/{limit:.2f})"
+                    })
+        except Exception:
+            pass
+
+# Summary
+if json_out:
+    output = {
+        "verified_date": verified_date,
+        "script_version": script_ver,
+        "default_model": default_model,
+        "providers": results,
+        "warnings": warnings,
+        "summary": {
+            "total": total,
+            "ok": ok_count,
+            "auth_fail": auth_fail_count,
+            "error": error_count,
+            "skipped": sum(1 for r in results if r["status"] == "skipped"),
+            "warnings": len(warnings),
+            "health_pct": int(ok_count * 100 / max(total - sum(1 for r in results if r["status"] == "skipped"), 1))
+        }
+    }
+    print(json.dumps(output, indent=2, ensure_ascii=False))
+else:
+    testable = total - sum(1 for r in results if r["status"] == "skipped")
+    print()
+    print(f"  ─────────────────────────────────")
+    print(f"  正常 {GREEN}{ok_count}{NC}/{testable}  认证失败 {RED}{auth_fail_count}{NC}  其他错误 {RED}{error_count}{NC}")
+    health = int(ok_count * 100 / max(testable, 1))
+    print(f"  健康度: {BOLD}{health}%{NC}")
+    if auth_fail_count > 0:
+        print()
+        print(f"  {YELLOW}提示: 认证失败的 Provider 需要更新 API Key{NC}")
+        print(f"  {DIM}运行: bash api-model-tester.sh --manage-keys{NC}")
+    if warnings:
+        print()
+        print(f"  {YELLOW}⚠ 发现 {len(warnings)} 个潜在问题:{NC}")
+        for w in warnings:
+            print(f"    {YELLOW}•{NC} [{w['type']}] {w['detail']}")
+    print()
+PYEOF
+}
+
 # --- 独立功能: Provider 可达性自检 ---
 run_selftest() {
     local verified_date
@@ -1316,6 +1935,7 @@ DO_FACTORY_RESET=false
 DO_BACKUP=false
 DO_TEST_API=false
 DO_SELFTEST=false
+DO_CHECKUP=false
 DO_STATUS=false
 RAW_URL=""
 API_KEY=""
@@ -1332,6 +1952,7 @@ _show_help() {
     echo "  $0 --rollback                         回退配置"
     echo "  $0 --manage-keys                      管理 API Key"
     echo "  $0 --status                           查看当前配置 (等同菜单7)"
+    echo "  $0 --checkup                          全面体检已配置 Provider (真实API调用)"
     echo "  $0 --selftest                         检测所有预设服务商可达性"
     echo "  $0 --backup                            备份配置文件"
     echo "  $0 --factory-reset                    还原默认配置"
@@ -1353,6 +1974,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --json)           JSON_OUTPUT=true ;;
         --yes)            AUTO_YES=true ;;
+        --checkup)        DO_CHECKUP=true ;;
         --selftest)       DO_SELFTEST=true ;;
         --status)         DO_STATUS=true ;;
         --wizard)         DO_WIZARD=true ;;
@@ -1382,7 +2004,7 @@ while [ $# -gt 0 ]; do
 done
 
 # 无任何 flag 也无位置参数 = 主菜单
-if ! $DO_SELFTEST && ! $DO_STATUS && ! $DO_WIZARD && ! $DO_DIAGNOSE && \
+if ! $DO_SELFTEST && ! $DO_CHECKUP && ! $DO_STATUS && ! $DO_WIZARD && ! $DO_DIAGNOSE && \
    ! $DO_SET_DEFAULT && ! $DO_ROLLBACK && ! $DO_MANAGE_KEYS && \
    ! $DO_VIEW_CONFIG && ! $DO_FACTORY_RESET && ! $DO_BACKUP && ! $DO_TEST_API && \
    ! $DO_TEST && ! $DO_SETUP && [ -z "$RAW_URL" ]; then
@@ -1421,6 +2043,9 @@ if [ "$DO_MENU" = true ]; then
     echo -e "  ${CYAN}9)${NC} ${BOLD}备份配置文件${NC}"
     echo -e "     ${DIM}备份 openclaw.json + auth-profiles + shell profile${NC}"
     echo ""
+    echo -e "  ${CYAN}10)${NC} ${BOLD}全面体检已配置 Provider${NC} ${YELLOW}(NEW)${NC}"
+    echo -e "     ${DIM}对每个已配置 Provider 发真实 API 请求，检测认证和可用性${NC}"
+    echo ""
     MENU_CHOICE=$(prompt_choice "请选择" "1")
     case "$MENU_CHOICE" in
         1) DO_WIZARD=true ;;
@@ -1432,6 +2057,7 @@ if [ "$DO_MENU" = true ]; then
         7) DO_VIEW_CONFIG=true ;;
         8) DO_FACTORY_RESET=true ;;
         9) DO_BACKUP=true ;;
+        10) DO_CHECKUP=true ;;
         *) echo -e "${RED}无效选择${NC}"; exit 1 ;;
     esac
 fi
@@ -1439,6 +2065,11 @@ fi
 # --- 分发独立功能 ---
 if [ "$DO_SELFTEST" = true ]; then
     run_selftest
+    exit 0
+fi
+
+if [ "$DO_CHECKUP" = true ]; then
+    run_checkup
     exit 0
 fi
 

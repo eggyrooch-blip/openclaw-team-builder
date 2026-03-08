@@ -203,7 +203,8 @@ Keeps last 10 backups in `~/.openclaw/backups/`. Restore with `--rollback`.
 |------|---------|
 | (no args) | Interactive main menu (default, recommended) |
 | `--wizard` | Step-by-step provider setup |
-| `--selftest --json` | Quick health check (1-2 seconds) |
+| `--checkup --json` | Full provider health check (real API calls + env var audit) |
+| `--selftest --json` | Quick built-in provider reachability (1-2 seconds) |
 | `--status --json` | Current config overview |
 | `--diagnose --json` | Find auth issues and problems |
 | `--manage-keys` | View/update provider keys |
